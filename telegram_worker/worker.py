@@ -1,4 +1,4 @@
-# telegram_worker/worker.py
+﻿# telegram_worker/worker.py
 import os, json, base64, asyncio, logging
 from pathlib import Path
 import requests
@@ -92,3 +92,4 @@ async def on_msg(ev):
 async def main():
     await client.start(); me=await client.get_me(); log.info(f"Logged in as {me.first_name} | id={me.id}"); log.info(f"SERVER_URL={SERVER_URL}"); log.info(f"Watching {len(SOURCE_CHATS)} source chats"); await client.run_until_disconnected()
 if __name__=="__main__": asyncio.run(main())
+
