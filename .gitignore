@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+data/
+*.session
+session.b64
+logs/
+
+SESSION_B64.txt
+
+SESSION_B64.txt
+
+SESSION_B64.txt

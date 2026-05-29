@@ -1,0 +1,13 @@
+{
+  "source": "TEST",
+  "symbol": "XAUUSD",
+  "direction": "BUY",
+  "entry_low": 4380.0,
+  "entry_high": 4385.0,
+  "sl": 4370.0,
+  "tp1": 4390.0,
+  "tp2": 4395.0,
+  "tp3": 4400.0,
+  "raw_text": "TEST BUY XAUUSD 4380-4385 SL 4370 TP1 4390 TP2 4395 TP3 4400",
+  "expires_minutes": 30
+}
