@@ -12,6 +12,16 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "").strip()
 ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-3-haiku-20240307").strip()
 USE_CLAUDE = os.environ.get("USE_CLAUDE_SIGNAL_AI", "1").strip() == "1"
 
+HYBRID_BLOCK_ENABLED = os.environ.get("BLOCK_HYBRID_SIGNALS", "1").strip() == "1"
+HYBRID_BLOCK_KEYWORDS = [
+    x.strip().lower()
+    for x in os.environ.get(
+        "HYBRID_BLOCK_KEYWORDS",
+        "hybrid,hybrid signal,hybrid signals,hybrid setup,hybrid entry",
+    ).split(",")
+    if x.strip()
+]
+
 CUSTOM_EMOJIS = {
     "DIAMOND": os.environ.get("CUSTOM_EMOJI_DIAMOND", "5427168083074628963"),
     "RED_ALERT": os.environ.get("CUSTOM_EMOJI_RED_ALERT", "5411225014148014586"),
@@ -51,6 +61,15 @@ def esc(value) -> str:
 
 def clean_text(text: str) -> str:
     return (text or "").replace("\u200b", "").strip()
+
+
+def is_hybrid_signal(text: str) -> bool:
+    if not HYBRID_BLOCK_ENABLED:
+        return False
+    low = clean_text(text).lower()
+    if not low:
+        return False
+    return any(keyword in low for keyword in HYBRID_BLOCK_KEYWORDS)
 
 
 def price(x) -> str:
@@ -117,6 +136,9 @@ def risk_icon(risk: str) -> str:
 
 
 def local_parse(text: str) -> Optional[Dict[str, Any]]:
+    if is_hybrid_signal(text):
+        return None
+
     parsed = parse_signal(text)
     if not parsed:
         return None
@@ -135,12 +157,16 @@ def local_parse(text: str) -> Optional[Dict[str, Any]]:
 
 
 def claude_parse(text: str) -> Optional[Dict[str, Any]]:
+    if is_hybrid_signal(text):
+        return None
+
     if not (USE_CLAUDE and ANTHROPIC_API_KEY):
         return None
 
     system = (
         "You extract actionable trading signals from messy Telegram messages. "
         "Return JSON only. If the message is not a trade signal, return {\"is_signal\":false}. "
+        "If the message mentions hybrid, hybrid signal, hybrid setup, or hybrid entry, return {\"is_signal\":false}. "
         "A valid signal must include direction, symbol/instrument, entry or entry zone, stop loss, and at least one take profit. "
         "Normalize GOLD/XAU/XAUUSD to XAUUSD. Keep prices as numbers. "
         "For entry zones, set entry_low to the lower price and entry_high to the higher price. "
@@ -231,6 +257,9 @@ def build_message(sig: Dict[str, Any]) -> str:
 def refine_signal(text: str, source_name: str = "ExposedFX", message_id=None) -> Optional[Dict[str, Any]]:
     text = clean_text(text)
     if not text:
+        return None
+
+    if is_hybrid_signal(text):
         return None
 
     sig = claude_parse(text) or local_parse(text)
