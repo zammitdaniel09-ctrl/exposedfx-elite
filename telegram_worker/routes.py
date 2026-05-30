@@ -31,9 +31,6 @@ ROUTES = [
     {"name": "MSC Premium", "source_chat": -1003909296106, "source_topic": None, "dest_chat": -1003918958200, "dest_topic": 34},
     {"name": "Master Premium", "source_chat": -1003457399744, "source_topic": None, "dest_chat": -1003918958200, "dest_topic": 20},
 
-    # Forward every topic/message from ExposedFX Elite into destination chat.
-    {"name": "ExposedFX All Topics", "source_chat": -1003918958200, "source_topic": None, "dest_chat": -5252460120, "dest_topic": None},
-
     # Added requested routes.
     {"name": "ExposedFX Route 362", "source_chat": -1002444443378, "source_topic": None, "dest_chat": -1003918958200, "dest_topic": 362},
     {"name": "Route 430", "source_chat": -1003753584094, "source_topic": None, "dest_chat": -1003918958200, "dest_topic": 430},
