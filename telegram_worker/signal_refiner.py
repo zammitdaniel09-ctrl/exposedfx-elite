@@ -1,3 +1,4 @@
+import html
 import json
 import os
 import re
@@ -10,6 +11,42 @@ from telegram_worker.parser import parse_signal
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "").strip()
 ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-3-haiku-20240307").strip()
 USE_CLAUDE = os.environ.get("USE_CLAUDE_SIGNAL_AI", "1").strip() == "1"
+
+CUSTOM_EMOJIS = {
+    "DIAMOND": os.environ.get("CUSTOM_EMOJI_DIAMOND", "5427168083074628963"),
+    "RED_ALERT": os.environ.get("CUSTOM_EMOJI_RED_ALERT", "5411225014148014586"),
+    "UPTREND_CHART": os.environ.get("CUSTOM_EMOJI_UPTREND_CHART", "5244837092042750681"),
+    "DOWNTREND_CHART": os.environ.get("CUSTOM_EMOJI_DOWNTREND_CHART", "5246762912428603768"),
+    "VERY_GOOD": os.environ.get("CUSTOM_EMOJI_VERY_GOOD", "5206607081334906820"),
+    "RED_CROSS": os.environ.get("CUSTOM_EMOJI_RED_CROSS", "5210952531676504517"),
+    "PIN_SIGNALS": os.environ.get("CUSTOM_EMOJI_PIN_SIGNALS", "5397782960512444700"),
+    "EXCLAMATION_RED": os.environ.get("CUSTOM_EMOJI_EXCLAMATION_RED", "5274099962655816924"),
+    "CAUTION_RED": os.environ.get("CUSTOM_EMOJI_CAUTION_RED", "5420323339723881652"),
+}
+
+EMOJI_FALLBACKS = {
+    "DIAMOND": "💎",
+    "RED_ALERT": "🔴",
+    "UPTREND_CHART": "📈",
+    "DOWNTREND_CHART": "📉",
+    "VERY_GOOD": "✅",
+    "RED_CROSS": "❌",
+    "PIN_SIGNALS": "📌",
+    "EXCLAMATION_RED": "❗️",
+    "CAUTION_RED": "⚠️",
+}
+
+
+def ce(name: str) -> str:
+    doc_id = str(CUSTOM_EMOJIS.get(name, "")).strip()
+    emoji = EMOJI_FALLBACKS.get(name, "")
+    if doc_id and doc_id.isdigit():
+        return f'<tg-emoji emoji-id="{doc_id}">{emoji}</tg-emoji>'
+    return emoji
+
+
+def esc(value) -> str:
+    return html.escape(str(value), quote=False)
 
 
 def clean_text(text: str) -> str:
@@ -34,9 +71,9 @@ def compact_range(high, low) -> str:
 
 
 def source_line(source_name: str, message_id) -> str:
-    source_name = source_name or "ExposedFX"
-    suffix = f" #{message_id}" if message_id else ""
-    return f"Source: {source_name}{suffix}"
+    source_name = esc(source_name or "ExposedFX")
+    suffix = f" #{esc(message_id)}" if message_id else ""
+    return f"{ce('DIAMOND')} Source: {source_name}{suffix}"
 
 
 def all_tps(text: str, parsed: Dict[str, Any]) -> List[float]:
@@ -64,15 +101,19 @@ def gold_risk(direction: str, entry_low: float, entry_high: float, sl: float) ->
     hi = float(entry_high)
     stop = float(sl)
     distance = max(abs(hi - stop), abs(lo - stop))
-
-    # Relaxed risk bands for XAUUSD-style signals.
-    # Small/tight stops are low risk, normal intraday stops are medium,
-    # only wider stops are marked high.
     if distance <= 8:
         return "LOW"
     if distance <= 15:
         return "MEDIUM"
     return "HIGH"
+
+
+def risk_icon(risk: str) -> str:
+    if risk == "LOW":
+        return ce("VERY_GOOD")
+    if risk == "MEDIUM":
+        return ce("EXCLAMATION_RED")
+    return ce("CAUTION_RED")
 
 
 def local_parse(text: str) -> Optional[Dict[str, Any]]:
@@ -154,7 +195,7 @@ def claude_parse(text: str) -> Optional[Dict[str, Any]]:
 
 def build_message(sig: Dict[str, Any]) -> str:
     direction = sig["direction"].upper()
-    symbol = sig.get("symbol", "XAUUSD").upper()
+    symbol = esc(sig.get("symbol", "XAUUSD").upper())
     lo = float(sig["entry_low"])
     hi = float(sig["entry_high"])
     sl = float(sig["sl"])
@@ -162,27 +203,27 @@ def build_message(sig: Dict[str, Any]) -> str:
     risk = gold_risk(direction, lo, hi, sl)
 
     if direction == "BUY":
-        heading = f"📈BUY {symbol} INTRADAY ZONE"
-        entry_lines = [f"• Buy Point : {price(hi)}"]
-        entry_lines.append(f"• Layer Point : {price(lo)}")
+        heading = f"{ce('UPTREND_CHART')}<b>BUY {symbol} INTRADAY ZONE</b>"
+        entry_lines = [f"• Buy Point : {esc(price(hi))}"]
+        entry_lines.append(f"• Layer Point : {esc(price(lo))}")
     else:
-        heading = f"🔴SELL {symbol} ZONE"
-        entry_lines = [f"• Sell Point : {price(lo)}"]
-        entry_lines.append(f"• Layer Point : {price(hi)}")
+        heading = f"{ce('RED_ALERT')}<b>SELL {symbol} ZONE</b>"
+        entry_lines = [f"• Sell Point : {esc(price(lo))}"]
+        entry_lines.append(f"• Layer Point : {esc(price(hi))}")
 
-    lines = [heading, "", *entry_lines, f"• Stop Loss : {price(sl)}", ""]
+    lines = [heading, "", *entry_lines, f"• Stop Loss : {esc(price(sl))}", ""]
     for idx, tp in enumerate(tps, 1):
-        lines.append(f"📌TP{idx} - {price(tp)}")
-    lines.append(f"📌TP{len(tps) + 1} - Open")
+        lines.append(f"{ce('PIN_SIGNALS')}TP{idx} - {esc(price(tp))}")
+    lines.append(f"{ce('PIN_SIGNALS')}TP{len(tps) + 1} - Open")
     lines += [
         "",
-        f"RISK: {risk}",
+        f"{risk_icon(risk)} RISK: {risk}",
         "",
         "TIPS:",
-        "Breakeven after TP1 HIT ❗️",
-        "Use correct Risk management ❗️",
-        "Take spread into consideration when placing SL❗️",
-        "THIS IS NOT FINANCIAL ADVICE ⚠️",
+        f"Breakeven after TP1 HIT {ce('EXCLAMATION_RED')}",
+        f"Use correct Risk management {ce('EXCLAMATION_RED')}",
+        f"Take spread into consideration when placing SL{ce('EXCLAMATION_RED')}",
+        f"THIS IS NOT FINANCIAL ADVICE {ce('CAUTION_RED')}",
     ]
     return "\n".join(lines)
 
