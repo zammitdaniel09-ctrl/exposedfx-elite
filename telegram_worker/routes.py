@@ -30,4 +30,11 @@ ROUTES = [
     {"name": "KEY / ALCHEMIST 2", "source_chat": -1003951604481, "source_topic": None, "dest_chat": -1003918958200, "dest_topic": 28},
     {"name": "MSC Premium", "source_chat": -1003909296106, "source_topic": None, "dest_chat": -1003918958200, "dest_topic": 34},
     {"name": "Master Premium", "source_chat": -1003457399744, "source_topic": None, "dest_chat": -1003918958200, "dest_topic": 20},
+
+    # Added requested routes.
+    {"name": "1% VIP SIGNALS", "source_chat": -1003903223523, "source_topic": None, "dest_chat": -1003918958200, "dest_topic": 17},
+    {"name": "ExposedFX Route 362", "source_chat": -1002444443378, "source_topic": None, "dest_chat": -1003918958200, "dest_topic": 362},
+
+    # Exact same source/destination topic requested. Worker skips exact self-routes to prevent duplicates/loops.
+    {"name": "Imperium Internal Topic 363", "source_chat": -1003918958200, "source_topic": 363, "dest_chat": -1003918958200, "dest_topic": 363},
 ]
