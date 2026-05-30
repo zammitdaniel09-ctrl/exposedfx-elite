@@ -134,20 +134,59 @@ def map_key(source_chat, source_msg_id, dest_chat, dest_topic):
     return f"{source_chat}:{source_msg_id}:{dest_chat}:{dest_topic}"
 
 
+def reply_source_ids(message):
+    reply = getattr(message, "reply_to", None)
+    if not reply:
+        return []
+
+    ids = []
+    reply_msg_id = getattr(reply, "reply_to_msg_id", None)
+    top_id = getattr(reply, "reply_to_top_id", None)
+
+    # For forum topics:
+    # reply_to_msg_id = actual message being replied to
+    # reply_to_top_id = topic root message
+    for value in (reply_msg_id, top_id):
+        if value and value not in ids:
+            ids.append(value)
+
+    return ids
+
+
+def mapped_reply_id(message, route):
+    for source_msg_id in reply_source_ids(message):
+        if route["source_topic"] is not None and source_msg_id == route["source_topic"]:
+            continue
+
+        key = map_key(route["source_chat"], source_msg_id, route["dest_chat"], route["dest_topic"])
+        mapped = message_map.get(key)
+
+        if mapped:
+            try:
+                return int(mapped)
+            except Exception:
+                return None
+
+    return None
+
+
 def reply_target(message, route):
     reply = getattr(message, "reply_to", None)
+
     if not reply:
         return route["dest_topic"]
 
-    reply_msg_id = getattr(reply, "reply_to_msg_id", None)
-    if not reply_msg_id:
-        return route["dest_topic"]
+    mapped = mapped_reply_id(message, route)
 
-    if route["source_topic"] is not None and reply_msg_id == route["source_topic"]:
-        return route["dest_topic"]
+    if mapped:
+        return mapped
 
-    key = map_key(route["source_chat"], reply_msg_id, route["dest_chat"], route["dest_topic"])
-    return int(message_map.get(key, route["dest_topic"]))
+    log.info(
+        f"[reply fallback] {route['name']} could not find mapped source reply "
+        f"ids={reply_source_ids(message)} -> using destination topic {route['dest_topic']}"
+    )
+
+    return route["dest_topic"]
 
 
 def remember_message(src_msg, dst_msg, route):
