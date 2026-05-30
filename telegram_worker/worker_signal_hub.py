@@ -23,6 +23,23 @@ def chat_id_from_env(name, default):
     return int(raw)
 
 
+def topic_set_from_env(name, default):
+    raw = os.environ.get(name, default).strip()
+    out = set()
+    for part in re.split(r"[,\s]+", raw):
+        part = part.strip()
+        if not part:
+            continue
+        if part.startswith("http") and "_" in part:
+            part = part.rsplit("_", 1)[-1]
+        part = part.replace("/", "")
+        try:
+            out.add(int(part))
+        except ValueError:
+            pass
+    return out
+
+
 SIGNAL_SOURCE_CHAT = chat_id_from_env("SIGNAL_SOURCE_CHAT", "-1003918958200")
 SIGNAL_DEST_CHAT = chat_id_from_env("SIGNAL_DEST_CHAT", "-5252460120")
 SEND_SOURCE_LINE = os.environ.get("SEND_SOURCE_LINE", "1").strip() == "1"
@@ -32,6 +49,8 @@ LINK_ONLY_RE = re.compile(r"^(?:https?://|t\.me/|www\.)\S+$", re.IGNORECASE)
 PARTIAL_BUFFER_ENABLED = os.environ.get("PARTIAL_SIGNAL_BUFFER", "1").strip() == "1"
 BUFFER_WINDOW_SECONDS = int(os.environ.get("SIGNAL_BUFFER_SECONDS", "600"))
 BUFFER_MAX_MESSAGES = int(os.environ.get("SIGNAL_BUFFER_MAX_MESSAGES", "8"))
+DEFAULT_ALLOWED_TOPICS = "23,430,28,2,31,35,11,363,25,29,33,20,362,17,34,22,9,36,10,14,4,16,13,12,8,7,6,5,3"
+ALLOWED_SOURCE_TOPICS = topic_set_from_env("ALLOWED_SOURCE_TOPICS", DEFAULT_ALLOWED_TOPICS)
 
 buffers = defaultdict(lambda: deque(maxlen=BUFFER_MAX_MESSAGES))
 sent_signatures = deque(maxlen=300)
@@ -39,6 +58,7 @@ sent_signature_set = set()
 
 TOPIC_NAMES = {
     2: "Triad FX",
+    3: "Topic 3",
     4: "Gold Trader Sunny",
     5: "NS Trades",
     6: "Platinum Intro Channel",
@@ -50,10 +70,8 @@ TOPIC_NAMES = {
     12: "SOL Gibbs",
     13: "Sniper Pro Academy",
     14: "McGarry and Gunter VIP",
-    15: "Olly Matthews",
     16: "ICT Trader",
     17: "1% VIP SIGNALS",
-    18: "LIFETIME VIP",
     20: "Master Premium",
     22: "Dropout VIP",
     23: "Market Slayers VIP",
@@ -75,27 +93,43 @@ def message_text(message):
     return message.message or message.raw_text or message.text or ""
 
 
-def should_skip(message):
-    text = message_text(message).strip()
-    if not text:
-        return True
-    if DROP_LINK_ONLY and LINK_ONLY_RE.match(text):
-        log.info("[signal hub skipped] plain link")
-        return True
-    return False
-
-
 def topic_id_of(message):
+    direct_top = getattr(message, "reply_to_top_id", None)
+    if direct_top:
+        return int(direct_top)
+    direct_msg = getattr(message, "reply_to_msg_id", None)
+    if direct_msg and getattr(message, "is_topic_message", False):
+        return int(direct_msg)
     reply = getattr(message, "reply_to", None)
     if not reply:
         return None
-    return getattr(reply, "reply_to_top_id", None) or getattr(reply, "reply_to_msg_id", None)
+    top_id = getattr(reply, "reply_to_top_id", None)
+    if top_id:
+        return int(top_id)
+    msg_id = getattr(reply, "reply_to_msg_id", None)
+    if msg_id:
+        return int(msg_id)
+    return None
 
 
 def topic_label(topic_id):
     if topic_id is None:
         return "Main Chat"
     return TOPIC_NAMES.get(int(topic_id), f"Topic {topic_id}")
+
+
+def should_skip(message):
+    text = message_text(message).strip()
+    if not text:
+        return True
+    topic_id = topic_id_of(message)
+    if topic_id is not None and ALLOWED_SOURCE_TOPICS and int(topic_id) not in ALLOWED_SOURCE_TOPICS:
+        log.info(f"[signal hub skipped] topic not in whitelist topic={topic_id}")
+        return True
+    if DROP_LINK_ONLY and LINK_ONLY_RE.match(text):
+        log.info("[signal hub skipped] plain link")
+        return True
+    return False
 
 
 def source_name_for(message):
@@ -126,7 +160,6 @@ def remember_signature(sig):
     sent_signature_set.add(sig)
     sent_signatures.append(sig)
     while len(sent_signature_set) > len(sent_signatures):
-        # Keep the set roughly aligned if the deque discards old signatures.
         sent_signature_set.clear()
         sent_signature_set.update(sent_signatures)
     return True
@@ -174,7 +207,6 @@ async def on_signal_hub_message(event):
         key = buffer_key(message)
         source_name = source_name_for(message)
 
-        # First try the current message alone, so complete signals are instant.
         result = refine_signal(text, source_name, message.id)
         if result:
             await send_result(message, result, key)
@@ -184,8 +216,6 @@ async def on_signal_hub_message(event):
             log.info("[signal hub skipped] not a clean signal")
             return
 
-        # Store partial messages per topic. If a provider sends entry first, then SL/TP later,
-        # the combined text becomes a valid signal and one clean AI signal is sent.
         buffers[key].append({"ts": time.time(), "id": message.id, "text": text})
         combined = combined_text_for(key)
         result = refine_signal(combined, source_name, message.id)
@@ -193,7 +223,7 @@ async def on_signal_hub_message(event):
             await send_result(message, result, key)
             return
 
-        log.info(f"[signal hub waiting] partial message stored key={key} size={len(buffers[key])}")
+        log.info(f"[signal hub waiting] partial message stored key={key} topic={topic_id_of(message)} size={len(buffers[key])}")
     except Exception as exc:
         log.exception(f"[signal hub failed] {exc}")
 
@@ -215,6 +245,7 @@ async def main():
     log.info(f"Logged in as {me.first_name} | id={me.id}")
     log.info(f"Signal hub source: {SIGNAL_SOURCE_CHAT}")
     log.info(f"Signal hub destination: {SIGNAL_DEST_CHAT}")
+    log.info(f"Allowed topics: {sorted(ALLOWED_SOURCE_TOPICS)}")
     log.info(f"Partial signal buffer: {PARTIAL_BUFFER_ENABLED} | window={BUFFER_WINDOW_SECONDS}s | max={BUFFER_MAX_MESSAGES}")
     await admin_startup(client)
     asyncio.create_task(admin_loop(client, stats))
