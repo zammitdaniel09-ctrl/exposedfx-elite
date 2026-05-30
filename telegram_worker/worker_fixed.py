@@ -61,7 +61,6 @@ def write_login_file():
     blob, source = combined_login_blob()
     if not blob:
         raise RuntimeError("No Telegram login data found in Railway variables.")
-
     raw = base64.b64decode(blob)
     SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
     SESSION_FILE.write_bytes(raw)
@@ -83,7 +82,6 @@ def save_map():
     tmp.replace(MESSAGE_MAP_FILE)
 
 
-# Critical: write login file before TelegramClient is created.
 write_login_file()
 message_map = load_map()
 client = TelegramClient(str(SESSION_BASE), API_ID, API_HASH)
@@ -160,10 +158,13 @@ def remember_message(src_msg, dst_msg, route):
     save_map()
 
 
-def maybe_post_signal(route, message, text)
-                result = stats.log_message(route, message, text)
-                if result:
-                    log.info(f"[stats logged] {route['name']} {result['status']} {result['pips']} pips"):
+def log_stats(route, message, text):
+    result = stats.log_message(route, message, text)
+    if result:
+        log.info(f"[stats logged] {route['name']} {result['status']} {result['pips']} pips")
+
+
+def maybe_post_signal(route, message, text):
     parsed = parse_signal(text)
     if not parsed:
         return
@@ -289,6 +290,7 @@ async def on_message(event):
             await copy_one(message, route)
             if text:
                 maybe_post_signal(route, message, text)
+                log_stats(route, message, text)
             direction = "outgoing" if getattr(message, "out", False) else "incoming"
             log.info(f"[copied:{direction}] {route['name']} source={chat_id}_{topic_id} -> dest={route['dest_chat']}_{route['dest_topic']}")
         except FloodWaitError as exc:
@@ -321,9 +323,7 @@ async def on_album(event):
             await copy_album(event.messages, route)
             if text:
                 maybe_post_signal(route, first, text)
-                result = stats.log_message(route, first, text)
-                if result:
-                    log.info(f"[stats logged] {route['name']} {result['status']} {result['pips']} pips")
+                log_stats(route, first, text)
             direction = "outgoing" if getattr(first, "out", False) else "incoming"
             log.info(f"[album copied:{direction}] {route['name']} items={len(event.messages)}")
         except Exception as exc:
