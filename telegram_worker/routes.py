@@ -32,11 +32,8 @@ ROUTES = [
     {"name": "Master Premium", "source_chat": -1003457399744, "source_topic": None, "dest_chat": -1003918958200, "dest_topic": 20},
 
     # Added requested routes.
-    {"name": "1% VIP SIGNALS", "source_chat": -1003903223523, "source_topic": None, "dest_chat": -1003918958200, "dest_topic": 17},
     {"name": "ExposedFX Route 362", "source_chat": -1002444443378, "source_topic": None, "dest_chat": -1003918958200, "dest_topic": 362},
-
-    # Exact same source/destination topic requested. Worker skips exact self-routes to prevent duplicates/loops.
-    {"name": "Imperium Internal Topic 363", "source_chat": -1003918958200, "source_topic": 363, "dest_chat": -1003918958200, "dest_topic": 363},
+    {"name": "Route 430", "source_chat": -1003753584094, "source_topic": None, "dest_chat": -1003918958200, "dest_topic": 430},
 
     # Auto-added: source topics from -1003852763875 into -1003918958200_363
     {"name": "R363 2786", "source_chat": -1003852763875, "source_topic": 2786, "dest_chat": -1003918958200, "dest_topic": 363},
@@ -48,5 +45,4 @@ ROUTES = [
     {"name": "R363 13", "source_chat": -1003852763875, "source_topic": 13, "dest_chat": -1003918958200, "dest_topic": 363},
     {"name": "R363 15", "source_chat": -1003852763875, "source_topic": 15, "dest_chat": -1003918958200, "dest_topic": 363},
     {"name": "R363 1877", "source_chat": -1003852763875, "source_topic": 1877, "dest_chat": -1003918958200, "dest_topic": 363},
-
 ]
