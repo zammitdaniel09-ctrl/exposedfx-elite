@@ -60,17 +60,17 @@ def all_tps(text: str, parsed: Dict[str, Any]) -> List[float]:
 
 
 def gold_risk(direction: str, entry_low: float, entry_high: float, sl: float) -> str:
-    direction = direction.upper()
     lo = float(entry_low)
     hi = float(entry_high)
     stop = float(sl)
-    if direction == "BUY":
-        distance = abs(lo - stop)
-    else:
-        distance = abs(stop - lo)
-    if distance <= 4:
-        return "LOW"
+    distance = max(abs(hi - stop), abs(lo - stop))
+
+    # Relaxed risk bands for XAUUSD-style signals.
+    # Small/tight stops are low risk, normal intraday stops are medium,
+    # only wider stops are marked high.
     if distance <= 8:
+        return "LOW"
+    if distance <= 15:
         return "MEDIUM"
     return "HIGH"
 
@@ -163,15 +163,12 @@ def build_message(sig: Dict[str, Any]) -> str:
 
     if direction == "BUY":
         heading = f"📈BUY {symbol} INTRADAY ZONE"
-        if abs(lo - hi) < 0.00001:
-            entry_lines = [f"• Buy Point : {price(lo)}"]
-        else:
-            entry_lines = [f"• Buy Point : {compact_range(hi, lo)}"]
+        entry_lines = [f"• Buy Point : {price(hi)}"]
+        entry_lines.append(f"• Layer Point : {price(lo)}")
     else:
         heading = f"🔴SELL {symbol} ZONE"
         entry_lines = [f"• Sell Point : {price(lo)}"]
-        if abs(lo - hi) >= 0.00001:
-            entry_lines.append(f"• Layer Point : {price(hi)}")
+        entry_lines.append(f"• Layer Point : {price(hi)}")
 
     lines = [heading, "", *entry_lines, f"• Stop Loss : {price(sl)}", ""]
     for idx, tp in enumerate(tps, 1):
