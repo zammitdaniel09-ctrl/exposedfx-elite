@@ -1,3 +1,5 @@
+import os
+
 # telegram_worker/routes.py
 # source_topic=None means all messages from that source.
 
@@ -46,3 +48,6 @@ ROUTES = [
     {"name": "R363 15", "source_chat": -1003852763875, "source_topic": 15, "dest_chat": -1003918958200, "dest_topic": 363},
     {"name": "R363 1877", "source_chat": -1003852763875, "source_topic": 1877, "dest_chat": -1003918958200, "dest_topic": 363},
 ]
+
+if os.environ.get("DISABLE_PROVIDER_ROUTES", "0").strip() == "1":
+    ROUTES = []
