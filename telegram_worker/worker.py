@@ -1,4 +1,4 @@
-﻿import os
+import os
 import json
 import base64
 import asyncio
@@ -95,7 +95,14 @@ client = TelegramClient(str(SESSION_BASE), API_ID, API_HASH)
 
 
 def get_text(message):
-    return message.raw_text or message.text or message.message or ""
+    # message.message keeps the exact Telegram text/caption body used by entity offsets.
+    return message.message or message.raw_text or message.text or ""
+
+
+def get_entities(message):
+    # Mandatory for keeping Telegram premium/custom animated emoji, spoilers, bold, italic, links, etc.
+    # Custom emoji can only remain animated if Telegram provides the custom-emoji entity and the sending account can use it.
+    return getattr(message, "entities", None) or []
 
 
 def get_topic_id(message):
@@ -105,13 +112,28 @@ def get_topic_id(message):
     return getattr(reply, "reply_to_top_id", None) or getattr(reply, "reply_to_msg_id", None)
 
 
+def is_exact_self_route(route, topic_id):
+    return (
+        route["source_chat"] == route["dest_chat"]
+        and route.get("source_topic") == route.get("dest_topic")
+        and topic_id == route.get("dest_topic")
+    )
+
+
 def matching_routes(chat_id, topic_id):
     out = []
     for route in ROUTES:
         if route["source_chat"] != chat_id:
             continue
-        if route["source_topic"] is None or route["source_topic"] == topic_id:
-            out.append(route)
+        if route["source_topic"] is not None and route["source_topic"] != topic_id:
+            continue
+        if is_exact_self_route(route, topic_id):
+            log.warning(
+                f"[self-route skipped] {route['name']} source and destination are the same: "
+                f"{route['source_chat']}_{topic_id}"
+            )
+            continue
+        out.append(route)
     return out
 
 
@@ -195,7 +217,7 @@ def post_signal(route, message, text):
 async def send_single(message, route):
     reply_to = get_reply_to(message, route)
     text = get_text(message)
-    entities = getattr(message, "entities", None)
+    entities = get_entities(message)
 
     if DRY_RUN:
         log.info(f"[DRY_RUN copy] {route['name']}")
@@ -207,6 +229,7 @@ async def send_single(message, route):
             message.media,
             caption=text if text else None,
             formatting_entities=entities if text else None,
+            parse_mode=None,
             reply_to=reply_to,
         )
     else:
@@ -214,6 +237,7 @@ async def send_single(message, route):
             route["dest_chat"],
             text if text else "Unsupported message type.",
             formatting_entities=entities if text else None,
+            parse_mode=None,
             reply_to=reply_to,
             link_preview=True,
         )
@@ -237,7 +261,7 @@ async def send_album(messages, route):
             text = get_text(msg)
             if text:
                 caption = text
-                caption_entities = getattr(msg, "entities", None)
+                caption_entities = get_entities(msg)
 
     if DRY_RUN:
         log.info(f"[DRY_RUN album] {route['name']} items={len(files)}")
@@ -249,6 +273,7 @@ async def send_album(messages, route):
             files,
             caption=caption,
             formatting_entities=caption_entities,
+            parse_mode=None,
             reply_to=reply_to,
         )
 
