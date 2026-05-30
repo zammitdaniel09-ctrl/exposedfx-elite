@@ -284,8 +284,9 @@ async def send_album(messages, route):
             store_mapping(first, sent, route)
 
 
-@client.on(events.NewMessage(chats=SOURCE_CHATS, incoming=True))
+@client.on(events.NewMessage(chats=SOURCE_CHATS))
 async def on_message(event):
+    # No incoming=True filter: we must also catch messages sent by this same account in owned/VIP source groups.
     message = event.message
 
     if getattr(message, "grouped_id", None):
@@ -306,7 +307,11 @@ async def on_message(event):
             if text:
                 post_signal(route, message, text)
 
-            log.info(f"[copied] {route['name']} source={chat_id}_{topic_id} -> dest={route['dest_chat']}_{route['dest_topic']}")
+            direction = "outgoing" if getattr(message, "out", False) else "incoming"
+            log.info(
+                f"[copied:{direction}] {route['name']} "
+                f"source={chat_id}_{topic_id} -> dest={route['dest_chat']}_{route['dest_topic']}"
+            )
 
         except FloodWaitError as e:
             log.warning(f"FloodWait {e.seconds}s")
@@ -341,7 +346,8 @@ async def on_album(event):
             if text:
                 post_signal(route, first, text)
 
-            log.info(f"[album copied] {route['name']} items={len(event.messages)}")
+            direction = "outgoing" if getattr(first, "out", False) else "incoming"
+            log.info(f"[album copied:{direction}] {route['name']} items={len(event.messages)}")
 
         except Exception as e:
             log.error(f"[album failed] {route['name']}: {e}")
