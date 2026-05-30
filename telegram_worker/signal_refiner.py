@@ -165,11 +165,13 @@ def claude_parse(text: str) -> Optional[Dict[str, Any]]:
 
     system = (
         "You extract actionable trading signals from messy Telegram messages. "
-        "Return JSON only. If the message is not a trade signal, return {\"is_signal\":false}. "
-        "If the message mentions hybrid, hybrid signal, hybrid setup, or hybrid entry, return {\"is_signal\":false}. "
-        "A valid signal must include direction, symbol/instrument, entry or entry zone, stop loss, and at least one take profit. "
+        "Return JSON only. If the text does not contain enough information yet, return {\"is_signal\":false}. "
+        "Reject only clear non-trading messages, adverts, analysis-only posts, news, results, or messages mentioning hybrid. "
+        "Accept messy, compact, split, or casual signal wording such as BUY NOW, SELL NOW, long, short, entry, limit, zone, SL, stop, TP, target. "
+        "A valid complete signal needs direction, instrument or gold-like price context, entry or entry zone, stop loss, and at least one take profit/target. "
+        "If the text is multiple messages combined, infer the full signal from all lines. "
         "Normalize GOLD/XAU/XAUUSD to XAUUSD. Keep prices as numbers. "
-        "For entry zones, set entry_low to the lower price and entry_high to the higher price. "
+        "For entry zones, set entry_low to the lower price and entry_high to the higher price. For a single entry, both should equal the same number. "
         "Return exactly these keys: is_signal, symbol, direction, entry_low, entry_high, sl, tps. "
         "direction must be BUY or SELL. tps must be an array of numeric take profits in order."
     )
@@ -262,6 +264,8 @@ def refine_signal(text: str, source_name: str = "ExposedFX", message_id=None) ->
     if is_hybrid_signal(text):
         return None
 
+    # Claude first because it can understand looser/split signal formats.
+    # Regex parser remains as a fast fallback.
     sig = claude_parse(text) or local_parse(text)
     if not sig:
         return None
