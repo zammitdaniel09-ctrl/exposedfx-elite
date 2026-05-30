@@ -40,6 +40,13 @@ def clean_text(text: str) -> str:
     text = text.replace("–", "-").replace("—", "-")
     text = text.replace("@", " ")
     text = re.sub(r"[✅🔥⚡️⚡🎯💎🚨📍🟢🔴]", " ", text)
+
+    # Handle compact Telegram typing like: SL 3990TP 4020 or TP1-4020TP2-4030
+    text = re.sub(r"(?i)(\d)(TP\s*\d*\b)", r"\1 \2", text)
+    text = re.sub(r"(?i)(\d)(SL\b|STOP\s*LOSS\b|STOP\b)", r"\1 \2", text)
+    text = re.sub(r"(?i)\b(TP\s*\d*|SL|STOP\s*LOSS|STOP)(?=\d)", r"\1 ", text)
+    text = re.sub(r"(?i)\b(TP)\s+(\d)\s+", r"\1\2 ", text)
+
     text = re.sub(r"\s+", " ", text)
     return text.strip()
 
@@ -60,7 +67,6 @@ def find_symbol(text: str) -> Optional[str]:
         if re.search(rf"\b{re.escape(a)}\b", t):
             return sym
 
-    # Infer XAUUSD if prices are gold-like.
     nums = [float(x) for x in re.findall(r"\b\d{3,5}(?:\.\d+)?\b", t)]
     if any(2500 <= n <= 6000 for n in nums):
         return "XAUUSD"
@@ -81,76 +87,51 @@ def find_sl(text: str) -> Optional[float]:
 
 def find_tps(text: str) -> List[float]:
     t = text.upper()
-    tps = []
+    found = []
 
-    for pat in [
-        r"\bTP\s*1?\s*[:\-]?\s*([0-9]{1,6}(?:\.\d+)?)",
-        r"\bTAKE\s*PROFIT\s*1?\s*[:\-]?\s*([0-9]{1,6}(?:\.\d+)?)",
-        r"\bTARGET\s*1?\s*[:\-]?\s*([0-9]{1,6}(?:\.\d+)?)",
-    ]:
+    patterns = [
+        r"\bTP\s*#?\s*\d*\s*[:\-]?\s*([0-9]{1,6}(?:\.\d+)?)",
+        r"\bTAKE\s*PROFIT\s*#?\s*\d*\s*[:\-]?\s*([0-9]{1,6}(?:\.\d+)?)",
+        r"\bTARGET\s*#?\s*\d*\s*[:\-]?\s*([0-9]{1,6}(?:\.\d+)?)",
+    ]
+    for pat in patterns:
         for m in re.finditer(pat, t):
-            tps.append(float(m.group(1)))
-
-    # Explicit TP1 TP2 TP3
-    explicit = []
-    for label in ["TP1", "TP2", "TP3", "TP4", "TP5"]:
-        m = re.search(rf"\b{label}\s*[:\-]?\s*([0-9]{{1,6}}(?:\.\d+)?)", t)
-        if m:
-            explicit.append(float(m.group(1)))
-
-    if explicit:
-        return explicit[:3]
+            found.append(float(m.group(1)))
 
     # Lines like: TP: 4390 4395 4400
-    m = re.search(r"\bTP[S]?\s*[:\-]\s*((?:[0-9]{1,6}(?:\.\d+)?\s*){1,5})", t)
+    m = re.search(r"\bTP[S]?\s*[:\-]\s*((?:[0-9]{1,6}(?:\.\d+)?\s*){1,9})", t)
     if m:
-        nums = [float(x) for x in re.findall(r"[0-9]{1,6}(?:\.\d+)?", m.group(1))]
-        if nums:
-            return nums[:3]
+        found.extend(float(x) for x in re.findall(r"[0-9]{1,6}(?:\.\d+)?", m.group(1)))
 
-    # Deduplicate, preserve order
     out = []
-    for x in tps:
+    for x in found:
         if x not in out:
             out.append(x)
-    return out[:3]
+    return out[:5]
 
 
 def find_entry_zone(text: str, direction: str, sl: Optional[float], tps: List[float]) -> Optional[tuple]:
-    """
-    Supports:
-    BUY XAUUSD 4380-4381
-    SELL GOLD @ 4380
-    Entry 4380-4385
-    BUY NOW 4380
-    """
     t = text.upper()
 
-    # Entry label
     m = re.search(r"\b(ENTRY|ENTRIES|ZONE)\s*[:\-]?\s*([0-9]{3,6}(?:\.\d+)?)\s*(?:-|TO)?\s*([0-9]{3,6}(?:\.\d+)?)?", t)
     if m:
         a = float(m.group(2))
         b = float(m.group(3)) if m.group(3) else a
         return (min(a, b), max(a, b))
 
-    # Direction + symbol + price range
-    m = re.search(r"\b(BUY|BUYS|SELL|SELLS|LONG|SHORT)\b.*?\b(?:XAUUSD|XAU|GOLD|NAS100|NAS|BTCUSD|BTC|EURUSD|GBPUSD|USDJPY)?\b\D{0,20}([0-9]{3,6}(?:\.\d+)?)\s*(?:-|TO)\s*([0-9]{3,6}(?:\.\d+)?)", t)
+    m = re.search(r"\b(BUY|BUYS|SELL|SELLS|LONG|SHORT)\b.*?\b(?:XAUUSD|XAU|GOLD|NAS100|NAS|BTCUSD|BTC|EURUSD|GBPUSD|USDJPY)?\b\D{0,25}([0-9]{3,6}(?:\.\d+)?)\s*(?:-|TO)\s*([0-9]{3,6}(?:\.\d+)?)", t)
     if m:
         a = float(m.group(2))
         b = float(m.group(3))
         return (min(a, b), max(a, b))
 
-    # Direction + single price
-    m = re.search(r"\b(BUY|BUYS|SELL|SELLS|LONG|SHORT)\b.*?\b(?:XAUUSD|XAU|GOLD|NAS100|NAS|BTCUSD|BTC|EURUSD|GBPUSD|USDJPY)?\b\D{0,20}([0-9]{3,6}(?:\.\d+)?)", t)
+    m = re.search(r"\b(BUY|BUYS|SELL|SELLS|LONG|SHORT)\b.*?\b(?:XAUUSD|XAU|GOLD|NAS100|NAS|BTCUSD|BTC|EURUSD|GBPUSD|USDJPY)?\b\D{0,25}([0-9]{3,6}(?:\.\d+)?)", t)
     if m:
         p = float(m.group(2))
-
-        # Avoid accidentally using SL or TP as entry.
         if sl and abs(p - sl) < 0.00001:
             return None
         if any(abs(p - tp) < 0.00001 for tp in tps):
             return None
-
         return (p, p)
 
     return None
@@ -175,7 +156,6 @@ def validate(direction: str, entry_low: float, entry_high: float, sl: float, tps
         if tp1 >= mid:
             return "SELL TP1 is not below entry"
 
-    # reject huge zones for gold, but keep generous for indices/crypto
     if abs(entry_high - entry_low) > 500:
         return "entry zone too wide"
 
@@ -222,6 +202,8 @@ def parse_signal(text: str) -> Optional[Dict]:
         "tp1": tps[0],
         "tp2": tps[1] if len(tps) > 1 else None,
         "tp3": tps[2] if len(tps) > 2 else None,
+        "tp4": tps[3] if len(tps) > 3 else None,
+        "tp5": tps[4] if len(tps) > 4 else None,
     }
 
 
@@ -229,10 +211,10 @@ if __name__ == "__main__":
     samples = [
         "BUY NOW GOLD 4380-4381 TP1: 4390 TP2: 4395 TP3: 4400 SL: 4370",
         "SELL XAUUSD 4535 - 4538 SL 4550 TP1 4520 TP2 4500",
+        "XAUUSD BUY NOW 4000-4010 SL 3990TP 4020 TP2 4030 TP3 4040",
         "GOLD SELLS BELOW 4535 TO 4384",
     ]
-
     for s in samples:
         print("RAW:", s)
+        print("CLEAN:", clean_text(s))
         print("PARSED:", parse_signal(s))
-        print()
