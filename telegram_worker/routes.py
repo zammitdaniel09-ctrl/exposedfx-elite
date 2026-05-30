@@ -37,4 +37,16 @@ ROUTES = [
 
     # Exact same source/destination topic requested. Worker skips exact self-routes to prevent duplicates/loops.
     {"name": "Imperium Internal Topic 363", "source_chat": -1003918958200, "source_topic": 363, "dest_chat": -1003918958200, "dest_topic": 363},
+
+    # Auto-added: source topics from -1003852763875 into -1003918958200_363
+    {"name": "R363 2786", "source_chat": -1003852763875, "source_topic": 2786, "dest_chat": -1003918958200, "dest_topic": 363},
+    {"name": "R363 11", "source_chat": -1003852763875, "source_topic": 11, "dest_chat": -1003918958200, "dest_topic": 363},
+    {"name": "R363 2524", "source_chat": -1003852763875, "source_topic": 2524, "dest_chat": -1003918958200, "dest_topic": 363},
+    {"name": "R363 2526", "source_chat": -1003852763875, "source_topic": 2526, "dest_chat": -1003918958200, "dest_topic": 363},
+    {"name": "R363 2539", "source_chat": -1003852763875, "source_topic": 2539, "dest_chat": -1003918958200, "dest_topic": 363},
+    {"name": "R363 31", "source_chat": -1003852763875, "source_topic": 31, "dest_chat": -1003918958200, "dest_topic": 363},
+    {"name": "R363 13", "source_chat": -1003852763875, "source_topic": 13, "dest_chat": -1003918958200, "dest_topic": 363},
+    {"name": "R363 15", "source_chat": -1003852763875, "source_topic": 15, "dest_chat": -1003918958200, "dest_topic": 363},
+    {"name": "R363 1877", "source_chat": -1003852763875, "source_topic": 1877, "dest_chat": -1003918958200, "dest_topic": 363},
+
 ]
