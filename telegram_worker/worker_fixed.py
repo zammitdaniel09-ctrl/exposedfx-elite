@@ -12,6 +12,7 @@ from telethon.tl.types import MessageMediaWebPage
 
 from telegram_worker.routes import ROUTES
 from telegram_worker.parser import parse_signal
+from telegram_worker.stats_reporter import WeeklyStats
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO").upper(),
@@ -34,6 +35,7 @@ MESSAGE_MAP_FILE = DATA_DIR / "message_map.json"
 
 SOURCE_CHATS = sorted(set(r["source_chat"] for r in ROUTES))
 POSTED_SIGNAL_KEYS = set()
+stats = WeeklyStats(DATA_DIR)
 
 
 def combined_login_blob():
@@ -158,7 +160,10 @@ def remember_message(src_msg, dst_msg, route):
     save_map()
 
 
-def maybe_post_signal(route, message, text):
+def maybe_post_signal(route, message, text)
+                result = stats.log_message(route, message, text)
+                if result:
+                    log.info(f"[stats logged] {route['name']} {result['status']} {result['pips']} pips"):
     parsed = parse_signal(text)
     if not parsed:
         return
@@ -316,6 +321,9 @@ async def on_album(event):
             await copy_album(event.messages, route)
             if text:
                 maybe_post_signal(route, first, text)
+                result = stats.log_message(route, first, text)
+                if result:
+                    log.info(f"[stats logged] {route['name']} {result['status']} {result['pips']} pips")
             direction = "outgoing" if getattr(first, "out", False) else "incoming"
             log.info(f"[album copied:{direction}] {route['name']} items={len(event.messages)}")
         except Exception as exc:
@@ -334,6 +342,8 @@ async def main():
     log.info(f"DRY_RUN={DRY_RUN}")
     log.info(f"Watching {len(SOURCE_CHATS)} source chats")
     log.info("Imperium fixed Telegram worker running...")
+    asyncio.create_task(stats.loop(client))
+    log.info("Weekly stats reporter running for Sunday 00:00 Europe/Malta")
     await client.run_until_disconnected()
 
 
