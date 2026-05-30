@@ -52,9 +52,9 @@ async def on_signal_hub_message(event):
             log.info("[signal hub skipped] not a clean signal")
             return
 
-        await client.send_message(SIGNAL_DEST_CHAT, result["message"], parse_mode=None, link_preview=False)
+        await client.send_message(SIGNAL_DEST_CHAT, result["message"], parse_mode="html", link_preview=False)
         if SEND_SOURCE_LINE:
-            await client.send_message(SIGNAL_DEST_CHAT, result["source"], parse_mode=None, link_preview=False)
+            await client.send_message(SIGNAL_DEST_CHAT, result["source"], parse_mode="html", link_preview=False)
 
         log.info(f"[signal hub sent] source_msg={message.id} -> {SIGNAL_DEST_CHAT}")
     except Exception as exc:
