@@ -178,6 +178,13 @@ def combined_text_for(key):
     return "\n".join(item["text"] for item in buffers[key] if item["text"].strip())
 
 
+def first_buffer_message(key):
+    trim_buffer(key)
+    if buffers[key]:
+        return buffers[key][0].get("message")
+    return None
+
+
 def remember_signature(sig):
     if sig in sent_signature_set:
         return False
@@ -266,7 +273,7 @@ async def on_signal_hub_message(event):
             return
 
         if looks_like_signal(text):
-            buffers[key].append({"ts": time.time(), "id": message.id, "text": text})
+            buffers[key].append({"ts": time.time(), "id": message.id, "text": text, "message": message})
         else:
             log.info("[signal hub skipped] not signal-like")
             return
@@ -274,7 +281,8 @@ async def on_signal_hub_message(event):
         combined = combined_text_for(key)
         result = extract_and_format(combined, source_name, message.id)
         if result:
-            await send_full_signal(message, result, key, text)
+            raw_msg = first_buffer_message(key) or message
+            await send_full_signal(raw_msg, result, key, message_text(raw_msg).strip())
             return
 
         log.info(f"[signal hub waiting] partial message stored key={key} topic={topic_id_of(message)} size={len(buffers[key])}")
