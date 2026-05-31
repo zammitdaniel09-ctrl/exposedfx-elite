@@ -14,6 +14,8 @@ from telegram_worker.universal_signal_ai import extract_and_format, looks_like_s
 
 log = logging.getLogger("exposedfx-ai-signal-formatter")
 
+PRICE_RE = r"\d{1,7}(?:\.\d+)?"
+
 
 def chat_id_from_env(name, default):
     raw = os.environ.get(name, default).strip()
@@ -185,6 +187,15 @@ def first_buffer_message(key):
     return None
 
 
+def looks_like_fresh_signal_start(text: str) -> bool:
+    """Detect a new setup so stale incomplete buffers do not swallow the next signal."""
+    t = (text or "").upper()
+    has_direction = bool(re.search(r"\b(BUY|BUYS|BUYING|SELL|SELLS|SELLING|LONG|LONGS|SHORT|SHORTS)\b", t))
+    has_entry = bool(re.search(rf"\b(ENTRY|ENTRIES|ENTER|ENTERING)\b[^\n]{{0,40}}{PRICE_RE}", t))
+    has_symbol = bool(re.search(r"\b(XAUUSD|XAGUSD|GOLD|SILVER|BTC|ETH|SOL|NAS100|NASDAQ|US100|US30|US500|GER40|DAX|[A-Z]{6})\b", t))
+    return has_direction and (has_entry or has_symbol)
+
+
 def remember_signature(sig):
     if sig in sent_signature_set:
         return False
@@ -262,6 +273,7 @@ async def on_signal_hub_message(event):
         source_name = source_name_for(message)
         log.info(f"[signal hub seen] msg={message.id} topic={topic_id_of(message)} text={text[:80]}")
 
+        # First try this message alone. Complete setups should not enter the partial buffer.
         result = extract_and_format(text, source_name, message.id)
         if result:
             await send_full_signal(message, result, key, text, forward_raw=True)
@@ -271,15 +283,21 @@ async def on_signal_hub_message(event):
             log.info("[signal hub skipped] not a clean signal")
             return
 
-        if looks_like_signal(text):
-            trim_buffer(key)
-            first_piece = len(buffers[key]) == 0
-            buffers[key].append({"ts": time.time(), "id": message.id, "text": text, "message": message})
-            if first_piece:
-                await forward_original(message, text)
-        else:
+        if not looks_like_signal(text):
             log.info("[signal hub skipped] not signal-like")
             return
+
+        trim_buffer(key)
+
+        # If a previous incomplete signal is stuck and a new setup starts, clear it.
+        if buffers[key] and looks_like_fresh_signal_start(text):
+            log.info(f"[signal hub buffer reset] fresh setup detected key={key}")
+            buffers[key].clear()
+
+        first_piece = len(buffers[key]) == 0
+        buffers[key].append({"ts": time.time(), "id": message.id, "text": text, "message": message})
+        if first_piece:
+            await forward_original(message, text)
 
         combined = combined_text_for(key)
         result = extract_and_format(combined, source_name, message.id)
