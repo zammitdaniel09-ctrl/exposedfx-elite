@@ -121,6 +121,10 @@ def is_my_formatted_signal(text: str) -> bool:
         "daily recap",
         "results",
         "profit today",
+        "instagram",
+        "free life-time vip",
+        "daily overview",
+        "market overview",
     ]
 
     if any(x in low for x in blocked):
@@ -133,11 +137,11 @@ def is_my_formatted_signal(text: str) -> bool:
         r"•\s*(?:buy|sell)\s+point\s*:\s*[-+]?\d",
         r"•\s*layer\s+point\s*:\s*[-+]?\d",
         r"•\s*stop\s+loss\s*:\s*[-+]?\d",
-        r"tp1\s*-\s*[-+]?\d",
-        r"tp2\s*-\s*[-+]?\d",
-        r"tp3\s*-\s*[-+]?\d",
-        r"tp8\s*-\s*[-+]?\d",
-        r"tp9\s*-\s*open",
+        r"(?:📌\s*)?tp1\s*-\s*[-+]?\d",
+        r"(?:📌\s*)?tp2\s*-\s*[-+]?\d",
+        r"(?:📌\s*)?tp3\s*-\s*[-+]?\d",
+        r"(?:📌\s*)?tp8\s*-\s*[-+]?\d",
+        r"(?:📌\s*)?tp9\s*-\s*open",
         r"risk\s*:\s*(?:low|medium|high)",
         r"tips\s*:",
         r"breakeven\s+after\s+tp1\s+hit",

@@ -296,14 +296,14 @@ async def on_signal_hub_message(event):
 
         first_piece = len(buffers[key]) == 0
         buffers[key].append({"ts": time.time(), "id": message.id, "text": text, "message": message})
-        if first_piece:
-            await forward_original(message, text)
+        # Do NOT forward candidate messages yet.
+        # Only forward the original after the setup is fully confirmed and formatted.
 
         combined = combined_text_for(key)
         result = extract_and_format(combined, source_name, message.id)
         if result:
             raw_msg = first_buffer_message(key) or message
-            await send_full_signal(raw_msg, result, key, message_text(raw_msg).strip(), forward_raw=False)
+            await send_full_signal(raw_msg, result, key, message_text(raw_msg).strip(), forward_raw=True)
             return
 
         log.info(f"[signal hub waiting] partial message stored key={key} topic={topic_id_of(message)} size={len(buffers[key])}")
