@@ -10,8 +10,7 @@ from telethon import events
 
 from telegram_worker.worker_fixed import client, stats
 from telegram_worker.admin_features import ADMIN_CHAT, admin_startup, admin_loop, handle_admin_command
-from telegram_worker.signal_refiner import refine_signal
-from telegram_worker.force_formatter import force_format
+from telegram_worker.universal_signal_ai import extract_and_format, looks_like_signal
 
 log = logging.getLogger("exposedfx-ai-signal-formatter")
 
@@ -103,7 +102,6 @@ def event_is_from_source(event):
     cid = getattr(event, "chat_id", None)
     if cid == SIGNAL_SOURCE_CHAT:
         return True
-
     channel_id = source_channel_id()
     msg = getattr(event, "message", None)
     peer = getattr(msg, "peer_id", None)
@@ -111,7 +109,6 @@ def event_is_from_source(event):
         return True
     if getattr(peer, "chat_id", None) == abs(SIGNAL_SOURCE_CHAT):
         return True
-
     if cid == channel_id:
         return True
     return False
@@ -158,14 +155,6 @@ def should_skip(message):
         log.info("[signal hub skipped] plain link")
         return True
     return False
-
-
-def looks_like_signal_candidate(text):
-    t = (text or "").upper()
-    has_action = bool(re.search(r"\b(BUY|BUYS|SELL|SELLS|LONG|SHORT)\b", t))
-    has_trade_terms = bool(re.search(r"\b(XAUUSD|XAU|GOLD|ENTRY|ENTRIES|ZONE|LIMIT|SL|STOP|TP\d*|TARGET)\b", t))
-    has_price = bool(re.search(r"\b\d{3,6}(?:\.\d+)?\b", t))
-    return has_price and (has_action or has_trade_terms)
 
 
 def source_name_for(message):
@@ -269,10 +258,10 @@ async def on_signal_hub_message(event):
         source_name = source_name_for(message)
         log.info(f"[signal hub seen] msg={message.id} topic={topic_id_of(message)} text={text[:80]}")
 
-        if looks_like_signal_candidate(text):
+        if looks_like_signal(text):
             await forward_original(message, text)
 
-        result = refine_signal(text, source_name, message.id) or force_format(text, source_name, message.id)
+        result = extract_and_format(text, source_name, message.id)
         if result:
             await send_result(message, result, key)
             return
@@ -283,7 +272,7 @@ async def on_signal_hub_message(event):
 
         buffers[key].append({"ts": time.time(), "id": message.id, "text": text})
         combined = combined_text_for(key)
-        result = refine_signal(combined, source_name, message.id) or force_format(combined, source_name, message.id)
+        result = extract_and_format(combined, source_name, message.id)
         if result:
             await send_result(message, result, key)
             return
@@ -312,6 +301,7 @@ async def main():
     log.info(f"Signal hub destination: {SIGNAL_DEST_CHAT}")
     log.info(f"Allowed topics: {sorted(ALLOWED_SOURCE_TOPICS)}")
     log.info(f"Forward signal candidates: {FORWARD_SIGNAL_CANDIDATES}")
+    log.info(f"Universal AI extractor active for any pair")
     log.info(f"Partial signal buffer: {PARTIAL_BUFFER_ENABLED} | window={BUFFER_WINDOW_SECONDS}s | max={BUFFER_MAX_MESSAGES}")
     await admin_startup(client)
     asyncio.create_task(admin_loop(client, stats))
