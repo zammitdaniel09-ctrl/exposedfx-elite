@@ -99,8 +99,8 @@ def all_tps(text: str, parsed: Dict[str, Any]) -> List[float]:
     t = clean_text(text).upper().replace(",", " ")
     values = []
     patterns = [
-        r"\bTP\s*(?:#?\s*\d+)?\s*[:\-]?\s*([0-9]{3,6}(?:\.\d+)?)",
-        r"\bTARGET\s*(?:#?\s*\d+)?\s*[:\-]?\s*([0-9]{3,6}(?:\.\d+)?)",
+        r"\bTP\s*(?:#?\s*\d+)?\s*[:\-]?\s*([0-9]{3,7}(?:\.\d+)?)",
+        r"\bTARGET\s*(?:#?\s*\d+)?\s*[:\-]?\s*([0-9]{3,7}(?:\.\d+)?)",
     ]
     for pat in patterns:
         for m in re.finditer(pat, t):
@@ -115,14 +115,56 @@ def all_tps(text: str, parsed: Dict[str, Any]) -> List[float]:
     return out[:8]
 
 
-def gold_risk(direction: str, entry_low: float, entry_high: float, sl: float) -> str:
+def symbol_family(symbol: str) -> str:
+    s = (symbol or "").upper().replace("/", "")
+    if s.startswith("XAU") or "GOLD" in s:
+        return "GOLD"
+    if any(x in s for x in ("BTC", "ETH", "SOL", "XRP", "USDT")):
+        return "CRYPTO"
+    if any(x in s for x in ("NAS", "US100", "US30", "SPX", "SP500", "GER", "DAX", "UK100")):
+        return "INDEX"
+    if len(s) == 6 and s.isalpha():
+        return "FOREX"
+    return "OTHER"
+
+
+def auto_risk(symbol: str, direction: str, entry_low: float, entry_high: float, sl: float) -> str:
     lo = float(entry_low)
     hi = float(entry_high)
     stop = float(sl)
+    mid = (lo + hi) / 2
     distance = max(abs(hi - stop), abs(lo - stop))
-    if distance <= 8:
+    pct = distance / mid if mid else 999
+    fam = symbol_family(symbol)
+
+    if fam == "GOLD":
+        if distance <= 8:
+            return "LOW"
+        if distance <= 18:
+            return "MEDIUM"
+        return "HIGH"
+    if fam == "CRYPTO":
+        if pct <= 0.003:
+            return "LOW"
+        if pct <= 0.008:
+            return "MEDIUM"
+        return "HIGH"
+    if fam == "INDEX":
+        if pct <= 0.0025:
+            return "LOW"
+        if pct <= 0.006:
+            return "MEDIUM"
+        return "HIGH"
+    if fam == "FOREX":
+        if pct <= 0.001:
+            return "LOW"
+        if pct <= 0.0025:
+            return "MEDIUM"
+        return "HIGH"
+
+    if pct <= 0.003:
         return "LOW"
-    if distance <= 15:
+    if pct <= 0.007:
         return "MEDIUM"
     return "HIGH"
 
@@ -133,6 +175,17 @@ def risk_icon(risk: str) -> str:
     if risk == "MEDIUM":
         return ce("EXCLAMATION_RED")
     return ce("CAUTION_RED")
+
+
+def estimated_layer(direction: str, entry_low: float, entry_high: float, sl: float) -> float:
+    lo = float(entry_low)
+    hi = float(entry_high)
+    stop = float(sl)
+    if abs(hi - lo) > 0.00001:
+        return lo if direction == "BUY" else hi
+    entry = hi
+    # Layer half-way between entry and SL, on the risk side.
+    return (entry + stop) / 2
 
 
 def local_parse(text: str) -> Optional[Dict[str, Any]]:
@@ -166,14 +219,15 @@ def claude_parse(text: str) -> Optional[Dict[str, Any]]:
     system = (
         "You extract actionable trading signals from messy Telegram messages. "
         "Return JSON only. If the text does not contain enough information yet, return {\"is_signal\":false}. "
-        "Reject only clear non-trading messages, adverts, analysis-only posts, news, results, or messages mentioning hybrid. "
+        "Reject only clear non-trading messages, adverts, analysis-only posts, news, or results. "
         "Accept messy, compact, split, or casual signal wording such as BUY NOW, SELL NOW, long, short, entry, limit, zone, SL, stop, TP, target. "
-        "A valid complete signal needs direction, instrument or gold-like price context, entry or entry zone, stop loss, and at least one take profit/target. "
+        "A valid complete signal needs direction, instrument or symbol context, entry or entry zone, stop loss, and at least one take profit/target or TP open. "
         "If the text is multiple messages combined, infer the full signal from all lines. "
-        "Normalize GOLD/XAU/XAUUSD to XAUUSD. Keep prices as numbers. "
+        "Normalize symbols but do not force all symbols to XAUUSD. GOLD/XAU/XAUUSD should become XAUUSD. BTC should become BTCUSD. "
         "For entry zones, set entry_low to the lower price and entry_high to the higher price. For a single entry, both should equal the same number. "
-        "Return exactly these keys: is_signal, symbol, direction, entry_low, entry_high, sl, tps. "
-        "direction must be BUY or SELL. tps must be an array of numeric take profits in order."
+        "If TP is open, return tps as an empty array and tp_open as true. "
+        "Return exactly these keys: is_signal, symbol, direction, entry_low, entry_high, sl, tps, tp_open, risk. "
+        "direction must be BUY or SELL. tps must be an array of numeric take profits in order. risk can be LOW, MEDIUM, HIGH, or empty."
     )
 
     try:
@@ -206,8 +260,10 @@ def claude_parse(text: str) -> Optional[Dict[str, Any]]:
         entry_high = float(obj.get("entry_high", entry_low))
         sl = float(obj["sl"])
         tps = [float(x) for x in obj.get("tps", []) if x is not None][:8]
-        if direction not in ("BUY", "SELL") or not tps:
+        tp_open = bool(obj.get("tp_open", False)) or "OPEN" in clean_text(text).upper()
+        if direction not in ("BUY", "SELL") or (not tps and not tp_open):
             return None
+        risk = str(obj.get("risk", "")).upper()
         return {
             "is_signal": True,
             "symbol": symbol,
@@ -216,6 +272,8 @@ def claude_parse(text: str) -> Optional[Dict[str, Any]]:
             "entry_high": max(entry_low, entry_high),
             "sl": sl,
             "tps": tps,
+            "tp_open": tp_open,
+            "risk": risk if risk in ("LOW", "MEDIUM", "HIGH") else "",
         }
     except Exception:
         return None
@@ -223,26 +281,35 @@ def claude_parse(text: str) -> Optional[Dict[str, Any]]:
 
 def build_message(sig: Dict[str, Any]) -> str:
     direction = sig["direction"].upper()
-    symbol = esc(sig.get("symbol", "XAUUSD").upper())
+    symbol_raw = sig.get("symbol", "XAUUSD").upper()
+    symbol = esc(symbol_raw)
     lo = float(sig["entry_low"])
     hi = float(sig["entry_high"])
     sl = float(sig["sl"])
     tps = [float(x) for x in sig.get("tps", [])][:8]
-    risk = gold_risk(direction, lo, hi, sl)
+    risk = str(sig.get("risk") or "").upper()
+    if risk not in ("LOW", "MEDIUM", "HIGH"):
+        risk = auto_risk(symbol_raw, direction, lo, hi, sl)
+    layer = float(sig.get("layer_point") or estimated_layer(direction, lo, hi, sl))
 
     if direction == "BUY":
         heading = f"{ce('UPTREND_CHART')}<b>BUY {symbol} INTRADAY ZONE</b>"
         entry_lines = [f"• Buy Point : {esc(price(hi))}"]
-        entry_lines.append(f"• Layer Point : {esc(price(lo))}")
+        entry_lines.append(f"• Layer Point : {esc(price(layer))}")
     else:
         heading = f"{ce('RED_ALERT')}<b>SELL {symbol} ZONE</b>"
         entry_lines = [f"• Sell Point : {esc(price(lo))}"]
-        entry_lines.append(f"• Layer Point : {esc(price(hi))}")
+        entry_lines.append(f"• Layer Point : {esc(price(layer))}")
 
     lines = [heading, "", *entry_lines, f"• Stop Loss : {esc(price(sl))}", ""]
     for idx, tp in enumerate(tps, 1):
         lines.append(f"{ce('PIN_SIGNALS')}TP{idx} - {esc(price(tp))}")
-    lines.append(f"{ce('PIN_SIGNALS')}TP{len(tps) + 1} - Open")
+
+    if len(tps) < 8:
+        lines.append(f"{ce('PIN_SIGNALS')}TP{len(tps) + 1} - Open")
+    else:
+        lines.append(f"{ce('PIN_SIGNALS')}TP9 - Open")
+
     lines += [
         "",
         f"{risk_icon(risk)} RISK: {risk}",
@@ -264,8 +331,6 @@ def refine_signal(text: str, source_name: str = "ExposedFX", message_id=None) ->
     if is_hybrid_signal(text):
         return None
 
-    # Claude first because it can understand looser/split signal formats.
-    # Regex parser remains as a fast fallback.
     sig = claude_parse(text) or local_parse(text)
     if not sig:
         return None
