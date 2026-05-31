@@ -10,6 +10,7 @@ from telegram_worker.signal_refiner import build_message, source_line
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "").strip()
 ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-3-haiku-20240307").strip()
 USE_CLAUDE = os.environ.get("USE_CLAUDE_SIGNAL_AI", "1").strip() == "1"
+AUTO_TP_IF_MISSING = os.environ.get("AUTO_TP_IF_MISSING", "1").strip() == "1"
 
 PRICE_RE = r"\d{1,7}(?:\.\d+)?"
 FOREX_CURRENCIES = {"EUR", "USD", "GBP", "JPY", "AUD", "NZD", "CAD", "CHF"}
@@ -247,7 +248,10 @@ def regex_extract(text: str) -> Optional[Dict[str, Any]]:
     if entry is None or sl is None:
         return None
     if not tps and not tp_open:
-        return None
+        if AUTO_TP_IF_MISSING:
+            tp_open = True
+        else:
+            return None
 
     mid = (entry[0] + entry[1]) / 2
     return {
@@ -285,7 +289,7 @@ def claude_extract(text: str) -> Optional[Dict[str, Any]]:
     system = (
         "Extract an actionable trading signal from messy Telegram text. Return JSON only. "
         "Accept any market: forex, metals, crypto, indices. "
-        "A complete signal needs direction, symbol, entry, stop loss, and numeric TPs or TP open. "
+        "A complete signal needs direction, entry, and stop loss. If no TP is provided, treat it as TP open so targets can be estimated. "
         "Use latest/current stop loss if several are shown. "
         "For TP open with no numbers, return tps=[] and tp_open=true. "
         "Return: is_signal, symbol, direction, entry_low, entry_high, sl, tps, tp_open, risk."
@@ -332,7 +336,10 @@ def claude_extract(text: str) -> Optional[Dict[str, Any]]:
             tps = regex_tps
         tp_open = bool(obj.get("tp_open", False)) or regex_open or "OPEN" in clean(text).upper()
         if not tps and not tp_open:
-            return None
+            if AUTO_TP_IF_MISSING:
+                tp_open = True
+            else:
+                return None
         mid = (entry_low + entry_high) / 2
         risk = str(obj.get("risk", "")).upper()
         if risk not in ("LOW", "MEDIUM", "HIGH"):
