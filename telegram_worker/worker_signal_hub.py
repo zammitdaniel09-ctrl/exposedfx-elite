@@ -46,6 +46,7 @@ SEND_SOURCE_LINE = os.environ.get("SEND_SOURCE_LINE", "1").strip() == "1"
 DROP_LINK_ONLY = os.environ.get("DROP_LINK_ONLY", "1").strip() == "1"
 LINK_ONLY_RE = re.compile(r"^(?:https?://|t\.me/|www\.)\S+$", re.IGNORECASE)
 
+FORWARD_SIGNAL_CANDIDATES = os.environ.get("FORWARD_SIGNAL_CANDIDATES", "1").strip() == "1"
 PARTIAL_BUFFER_ENABLED = os.environ.get("PARTIAL_SIGNAL_BUFFER", "1").strip() == "1"
 BUFFER_WINDOW_SECONDS = int(os.environ.get("SIGNAL_BUFFER_SECONDS", "600"))
 BUFFER_MAX_MESSAGES = int(os.environ.get("SIGNAL_BUFFER_MAX_MESSAGES", "8"))
@@ -55,6 +56,7 @@ ALLOWED_SOURCE_TOPICS = topic_set_from_env("ALLOWED_SOURCE_TOPICS", DEFAULT_ALLO
 buffers = defaultdict(lambda: deque(maxlen=BUFFER_MAX_MESSAGES))
 sent_signatures = deque(maxlen=300)
 sent_signature_set = set()
+forwarded_originals = set()
 
 TOPIC_NAMES = {
     2: "Triad FX",
@@ -132,6 +134,14 @@ def should_skip(message):
     return False
 
 
+def looks_like_signal_candidate(text):
+    t = (text or "").upper()
+    has_action = bool(re.search(r"\b(BUY|BUYS|SELL|SELLS|LONG|SHORT)\b", t))
+    has_trade_terms = bool(re.search(r"\b(XAUUSD|XAU|GOLD|ENTRY|ENTRIES|ZONE|LIMIT|SL|STOP|TP\d*|TARGET)\b", t))
+    has_price = bool(re.search(r"\b\d{3,6}(?:\.\d+)?\b", t))
+    return has_price and (has_action or has_trade_terms)
+
+
 def source_name_for(message):
     topic_id = topic_id_of(message)
     return f"ExposedFX | {topic_label(topic_id)}"
@@ -181,6 +191,24 @@ def signature_for(result, key):
     return hashlib.sha256(base.encode("utf-8", errors="ignore")).hexdigest()
 
 
+async def forward_original(message, text):
+    if not FORWARD_SIGNAL_CANDIDATES:
+        return False
+    unique = (getattr(message, "chat_id", SIGNAL_SOURCE_CHAT), message.id)
+    if unique in forwarded_originals:
+        return False
+    forwarded_originals.add(unique)
+
+    try:
+        await client.forward_messages(SIGNAL_DEST_CHAT, message)
+        log.info(f"[signal hub original forwarded] msg={message.id} topic={topic_id_of(message)}")
+        return True
+    except Exception as exc:
+        log.warning(f"Forward original failed, sending text copy instead: {exc}")
+        await client.send_message(SIGNAL_DEST_CHAT, text, parse_mode=None, link_preview=False)
+        return True
+
+
 async def send_result(message, result, key):
     sig = signature_for(result, key)
     if not remember_signature(sig):
@@ -206,6 +234,9 @@ async def on_signal_hub_message(event):
         text = message_text(message).strip()
         key = buffer_key(message)
         source_name = source_name_for(message)
+
+        if looks_like_signal_candidate(text):
+            await forward_original(message, text)
 
         result = refine_signal(text, source_name, message.id)
         if result:
@@ -246,6 +277,7 @@ async def main():
     log.info(f"Signal hub source: {SIGNAL_SOURCE_CHAT}")
     log.info(f"Signal hub destination: {SIGNAL_DEST_CHAT}")
     log.info(f"Allowed topics: {sorted(ALLOWED_SOURCE_TOPICS)}")
+    log.info(f"Forward signal candidates: {FORWARD_SIGNAL_CANDIDATES}")
     log.info(f"Partial signal buffer: {PARTIAL_BUFFER_ENABLED} | window={BUFFER_WINDOW_SECONDS}s | max={BUFFER_MAX_MESSAGES}")
     await admin_startup(client)
     asyncio.create_task(admin_loop(client, stats))
