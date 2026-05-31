@@ -56,7 +56,6 @@ ALLOWED_SOURCE_TOPICS = topic_set_from_env("ALLOWED_SOURCE_TOPICS", DEFAULT_ALLO
 buffers = defaultdict(lambda: deque(maxlen=BUFFER_MAX_MESSAGES))
 sent_signatures = deque(maxlen=300)
 sent_signature_set = set()
-forwarded_originals = set()
 
 TOPIC_NAMES = {
     2: "Triad FX",
@@ -199,7 +198,7 @@ def signature_for(result, key):
         str(parsed.get("entry_low", "")),
         str(parsed.get("entry_high", "")),
         str(parsed.get("sl", "")),
-        ",".join(str(x) for x in parsed.get("tps", [])[:5]) if isinstance(parsed.get("tps"), list) else "",
+        ",".join(str(x) for x in parsed.get("tps", [])[:8]) if isinstance(parsed.get("tps"), list) else "",
     ])
     if base.count("|") < 5:
         base = result.get("message", "")
@@ -209,11 +208,6 @@ def signature_for(result, key):
 async def forward_original(message, text):
     if not FORWARD_SIGNAL_CANDIDATES:
         return False
-    unique = (getattr(message, "chat_id", SIGNAL_SOURCE_CHAT), message.id)
-    if unique in forwarded_originals:
-        return False
-    forwarded_originals.add(unique)
-
     try:
         await client.forward_messages(SIGNAL_DEST_CHAT, message)
         log.info(f"[signal hub original forwarded] msg={message.id} topic={topic_id_of(message)}")
@@ -224,18 +218,22 @@ async def forward_original(message, text):
         return True
 
 
-async def send_result(message, result, key):
+async def send_full_signal(message, result, key, original_text):
+    # One signature controls the whole packet: original forward + AI format + source.
+    # This prevents duplicate original forwards when Telegram emits the same signal twice
+    # or when partial-buffer parsing also resolves the same setup.
     sig = signature_for(result, key)
     if not remember_signature(sig):
-        log.info("[signal hub skipped] duplicate formatted signal")
+        log.info("[signal hub skipped] duplicate signal packet")
         return False
 
     try:
+        await forward_original(message, original_text)
         await client.send_message(SIGNAL_DEST_CHAT, result["message"], parse_mode="html", link_preview=False)
         if SEND_SOURCE_LINE:
             await client.send_message(SIGNAL_DEST_CHAT, result["source"], parse_mode="html", link_preview=False)
     except Exception as exc:
-        log.exception(f"[signal hub formatted send failed] {exc}")
+        log.exception(f"[signal hub packet send failed] {exc}")
         return False
 
     buffers[key].clear()
@@ -258,23 +256,25 @@ async def on_signal_hub_message(event):
         source_name = source_name_for(message)
         log.info(f"[signal hub seen] msg={message.id} topic={topic_id_of(message)} text={text[:80]}")
 
-        if looks_like_signal(text):
-            await forward_original(message, text)
-
         result = extract_and_format(text, source_name, message.id)
         if result:
-            await send_result(message, result, key)
+            await send_full_signal(message, result, key, text)
             return
 
         if not PARTIAL_BUFFER_ENABLED:
             log.info("[signal hub skipped] not a clean signal")
             return
 
-        buffers[key].append({"ts": time.time(), "id": message.id, "text": text})
+        if looks_like_signal(text):
+            buffers[key].append({"ts": time.time(), "id": message.id, "text": text})
+        else:
+            log.info("[signal hub skipped] not signal-like")
+            return
+
         combined = combined_text_for(key)
         result = extract_and_format(combined, source_name, message.id)
         if result:
-            await send_result(message, result, key)
+            await send_full_signal(message, result, key, text)
             return
 
         log.info(f"[signal hub waiting] partial message stored key={key} topic={topic_id_of(message)} size={len(buffers[key])}")
@@ -300,7 +300,7 @@ async def main():
     log.info(f"Signal hub source: {SIGNAL_SOURCE_CHAT} | source channel id: {source_channel_id()}")
     log.info(f"Signal hub destination: {SIGNAL_DEST_CHAT}")
     log.info(f"Allowed topics: {sorted(ALLOWED_SOURCE_TOPICS)}")
-    log.info(f"Forward signal candidates: {FORWARD_SIGNAL_CANDIDATES}")
+    log.info(f"Forward original only after confirmed signal: {FORWARD_SIGNAL_CANDIDATES}")
     log.info(f"Universal AI extractor active for any pair")
     log.info(f"Partial signal buffer: {PARTIAL_BUFFER_ENABLED} | window={BUFFER_WINDOW_SECONDS}s | max={BUFFER_MAX_MESSAGES}")
     await admin_startup(client)
