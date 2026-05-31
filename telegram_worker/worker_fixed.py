@@ -26,6 +26,7 @@ API_HASH = os.environ["API_HASH"]
 SERVER_URL = os.environ.get("SERVER_URL", "").rstrip("/")
 AUTO_TOKEN = os.environ.get("AUTO_TOKEN", "change-this-token")
 DRY_RUN = os.environ.get("DRY_RUN", "0").strip() == "1"
+FORWARD_EDITED_MESSAGES = os.environ.get("FORWARD_EDITED_MESSAGES", "1").strip() == "1"
 
 DATA_DIR = Path(os.environ.get("DATA_DIR") or "./data")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -114,10 +115,38 @@ def entities_of(message):
 
 
 def topic_of(message):
+    """
+    Robust Telegram forum topic detection.
+
+    If topic_id is wrong/None, routes with source_topic never match,
+    so VIP messages silently stop forwarding.
+    """
+    for attr in ("reply_to_top_id", "top_msg_id"):
+        value = getattr(message, attr, None)
+        if value:
+            try:
+                return int(value)
+            except Exception:
+                pass
+
+    direct_reply_id = getattr(message, "reply_to_msg_id", None)
+    if direct_reply_id and getattr(message, "is_topic_message", False):
+        try:
+            return int(direct_reply_id)
+        except Exception:
+            pass
+
     reply = getattr(message, "reply_to", None)
-    if not reply:
-        return None
-    return getattr(reply, "reply_to_top_id", None) or getattr(reply, "reply_to_msg_id", None)
+    if reply:
+        for attr in ("reply_to_top_id", "top_msg_id", "reply_to_msg_id"):
+            value = getattr(reply, attr, None)
+            if value:
+                try:
+                    return int(value)
+                except Exception:
+                    pass
+
+    return None
 
 
 def same_source_and_destination(route, topic_id):
@@ -327,6 +356,7 @@ async def copy_album(messages, route):
 
 
 @client.on(events.NewMessage(chats=SOURCE_CHATS))
+@client.on(events.MessageEdited(chats=SOURCE_CHATS))
 async def on_message(event):
     message = event.message
     if getattr(message, "grouped_id", None):
@@ -336,6 +366,7 @@ async def on_message(event):
     topic_id = topic_of(message)
     routes = routes_for(chat_id, topic_id)
     if not routes:
+        log.info(f"[no route] source={chat_id}_{topic_id} msg={getattr(message, 'id', None)} text={text_of(message)[:80]!r}")
         return
 
     text = text_of(message)
@@ -394,7 +425,9 @@ async def main():
     log.info(f"SERVER_URL={SERVER_URL}")
     log.info(f"DATA_DIR={DATA_DIR}")
     log.info(f"DRY_RUN={DRY_RUN}")
-    log.info(f"Watching {len(SOURCE_CHATS)} source chats")
+    log.info(f"Watching {len(SOURCE_CHATS)} source chats: {SOURCE_CHATS}")
+    log.info(f"Loaded {len(ROUTES)} routes")
+    log.info(f"FORWARD_EDITED_MESSAGES={FORWARD_EDITED_MESSAGES}")
     log.info("Imperium fixed Telegram worker running...")
     asyncio.create_task(stats.loop(client))
     log.info("Weekly stats reporter running for Sunday 00:00 Europe/Malta")
