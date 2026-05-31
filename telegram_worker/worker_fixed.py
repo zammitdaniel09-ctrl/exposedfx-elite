@@ -38,15 +38,33 @@ POSTED_SIGNAL_KEYS = set()
 stats = WeeklyStats(DATA_DIR)
 
 
+def _clean_b64(value: str) -> str:
+    return "".join((value or "").split()).strip()
+
+
 def combined_login_blob():
-    direct = os.environ.get("SESSION_B64", "").strip()
+    direct = _clean_b64(os.environ.get("SESSION_B64", ""))
     if direct:
         return direct, "SESSION_B64"
+
+    count_raw = os.environ.get("SESSION_B64_CHUNKS", "").strip()
+    if count_raw:
+        try:
+            count = int(count_raw)
+        except ValueError:
+            raise RuntimeError(f"Invalid SESSION_B64_CHUNKS value: {count_raw}")
+        chunks = []
+        for i in range(1, count + 1):
+            chunk = _clean_b64(os.environ.get(f"SESSION_B64_{i}", ""))
+            if not chunk:
+                raise RuntimeError(f"SESSION_B64_CHUNKS={count} but SESSION_B64_{i} is missing")
+            chunks.append(chunk)
+        return "".join(chunks), f"{count} chunks fixed-count"
 
     chunks = []
     i = 1
     while True:
-        chunk = os.environ.get(f"SESSION_B64_{i}", "").strip()
+        chunk = _clean_b64(os.environ.get(f"SESSION_B64_{i}", ""))
         if not chunk:
             break
         chunks.append(chunk)
@@ -143,9 +161,6 @@ def reply_source_ids(message):
     reply_msg_id = getattr(reply, "reply_to_msg_id", None)
     top_id = getattr(reply, "reply_to_top_id", None)
 
-    # For forum topics:
-    # reply_to_msg_id = actual message being replied to
-    # reply_to_top_id = topic root message
     for value in (reply_msg_id, top_id):
         if value and value not in ids:
             ids.append(value)
