@@ -226,9 +226,6 @@ async def forward_original(message, text):
 
 
 async def send_full_signal(message, result, key, original_text, forward_raw=True):
-    # One signature controls the whole packet: original forward + AI format + source.
-    # This prevents duplicate original forwards when Telegram emits the same signal twice
-    # or when partial-buffer parsing also resolves the same setup.
     sig = signature_for(result, key)
     if not remember_signature(sig):
         log.info("[signal hub skipped] duplicate signal packet")
@@ -236,7 +233,6 @@ async def send_full_signal(message, result, key, original_text, forward_raw=True
 
     try:
         if forward_raw:
-            if forward_raw:
             await forward_original(message, original_text)
         await client.send_message(SIGNAL_DEST_CHAT, result["message"], parse_mode="html", link_preview=False)
         if SEND_SOURCE_LINE:
@@ -268,7 +264,7 @@ async def on_signal_hub_message(event):
 
         result = extract_and_format(text, source_name, message.id)
         if result:
-            await send_full_signal(message, result, key, text)
+            await send_full_signal(message, result, key, text, forward_raw=True)
             return
 
         if not PARTIAL_BUFFER_ENABLED:
