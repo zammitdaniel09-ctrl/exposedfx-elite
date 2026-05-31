@@ -292,7 +292,16 @@ def regex_extract(text: str) -> Optional[Dict[str, Any]]:
         return None
     sl = float(sl_matches[-1])
 
-    tps = [float(x) for x in re.findall(r"\b(?:TP\s*#?\s*\d*|TARGET\s*#?\s*\d*|TAKE\s*PROFIT)\b\s*[:\-]?\s*(\d{2,7}(?:\.\d+)?)", up)]
+    tps = []
+    for pat in [
+        r"\bTP\s*#?\s*\d*\s*[\(\[\{:\-]?\s*(\d{2,7}(?:\.\d+)?)\s*[\)\]\}]?",
+        r"\bTARGET\s*#?\s*\d*\s*[\(\[\{:\-]?\s*(\d{2,7}(?:\.\d+)?)\s*[\)\]\}]?",
+        r"\bTAKE\s*PROFIT\s*#?\s*\d*\s*[\(\[\{:\-]?\s*(\d{2,7}(?:\.\d+)?)\s*[\)\]\}]?",
+    ]:
+        for x in re.findall(pat, up):
+            v = float(x)
+            if v >= 10 and v not in tps:
+                tps.append(v)
     tp_open = bool(re.search(r"\b(TP|TAKE\s*PROFIT|TARGET)\b\s*[:\-]?\s*OPEN\b", up))
     if not tps and not tp_open:
         return None
@@ -313,7 +322,7 @@ def regex_extract(text: str) -> Optional[Dict[str, Any]]:
 
 
 def extract_and_format(text: str, source_name: str, message_id=None) -> Optional[Dict[str, Any]]:
-    sig = claude_extract(text) or regex_extract(text)
+    sig = regex_extract(text) or claude_extract(text)
     if not sig:
         return None
     return {
