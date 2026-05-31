@@ -225,7 +225,7 @@ async def forward_original(message, text):
         return True
 
 
-async def send_full_signal(message, result, key, original_text):
+async def send_full_signal(message, result, key, original_text, forward_raw=True):
     # One signature controls the whole packet: original forward + AI format + source.
     # This prevents duplicate original forwards when Telegram emits the same signal twice
     # or when partial-buffer parsing also resolves the same setup.
@@ -235,7 +235,8 @@ async def send_full_signal(message, result, key, original_text):
         return False
 
     try:
-        await forward_original(message, original_text)
+        if forward_raw:
+            await forward_original(message, original_text)
         await client.send_message(SIGNAL_DEST_CHAT, result["message"], parse_mode="html", link_preview=False)
         if SEND_SOURCE_LINE:
             await client.send_message(SIGNAL_DEST_CHAT, result["source"], parse_mode="html", link_preview=False)
@@ -249,6 +250,7 @@ async def send_full_signal(message, result, key, original_text):
 
 
 @client.on(events.NewMessage())
+@client.on(events.MessageEdited())
 async def on_signal_hub_message(event):
     try:
         if not event_is_from_source(event):
@@ -273,7 +275,11 @@ async def on_signal_hub_message(event):
             return
 
         if looks_like_signal(text):
+            trim_buffer(key)
+            first_piece = len(buffers[key]) == 0
             buffers[key].append({"ts": time.time(), "id": message.id, "text": text, "message": message})
+            if first_piece:
+                await forward_original(message, text)
         else:
             log.info("[signal hub skipped] not signal-like")
             return
@@ -282,7 +288,7 @@ async def on_signal_hub_message(event):
         result = extract_and_format(combined, source_name, message.id)
         if result:
             raw_msg = first_buffer_message(key) or message
-            await send_full_signal(raw_msg, result, key, message_text(raw_msg).strip())
+            await send_full_signal(raw_msg, result, key, message_text(raw_msg).strip(), forward_raw=False)
             return
 
         log.info(f"[signal hub waiting] partial message stored key={key} topic={topic_id_of(message)} size={len(buffers[key])}")
