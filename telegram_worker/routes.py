@@ -47,6 +47,47 @@ ROUTES = [
     {"name": "R363 13", "source_chat": -1003852763875, "source_topic": 13, "dest_chat": -1003918958200, "dest_topic": 363},
     {"name": "R363 15", "source_chat": -1003852763875, "source_topic": 15, "dest_chat": -1003918958200, "dest_topic": 363},
     {"name": "R363 1877", "source_chat": -1003852763875, "source_topic": 1877, "dest_chat": -1003918958200, "dest_topic": 363},
+
+    # Auto-added 2026-05-31: all requested topics from -1003860051934 to -1003918958200_569
+    {"name": "Route569 2", "source_chat": -1003860051934, "source_topic": 2, "dest_chat": -1003918958200, "dest_topic": 569},
+    {"name": "Route569 155", "source_chat": -1003860051934, "source_topic": 155, "dest_chat": -1003918958200, "dest_topic": 569},
+    {"name": "Route569 1", "source_chat": -1003860051934, "source_topic": 1, "dest_chat": -1003918958200, "dest_topic": 569},
+    {"name": "Route569 439", "source_chat": -1003860051934, "source_topic": 439, "dest_chat": -1003918958200, "dest_topic": 569},
+    {"name": "Route569 116", "source_chat": -1003860051934, "source_topic": 116, "dest_chat": -1003918958200, "dest_topic": 569},
+    {"name": "Route569 543", "source_chat": -1003860051934, "source_topic": 543, "dest_chat": -1003918958200, "dest_topic": 569},
+    {"name": "Route569 5", "source_chat": -1003860051934, "source_topic": 5, "dest_chat": -1003918958200, "dest_topic": 569},
+    {"name": "Route569 54", "source_chat": -1003860051934, "source_topic": 54, "dest_chat": -1003918958200, "dest_topic": 569},
+    {"name": "Route569 156", "source_chat": -1003860051934, "source_topic": 156, "dest_chat": -1003918958200, "dest_topic": 569},
+    {"name": "Route569 209", "source_chat": -1003860051934, "source_topic": 209, "dest_chat": -1003918958200, "dest_topic": 569},
+    {"name": "Route569 243", "source_chat": -1003860051934, "source_topic": 243, "dest_chat": -1003918958200, "dest_topic": 569},
+    {"name": "Route569 272", "source_chat": -1003860051934, "source_topic": 272, "dest_chat": -1003918958200, "dest_topic": 569},
+    {"name": "Route569 331", "source_chat": -1003860051934, "source_topic": 331, "dest_chat": -1003918958200, "dest_topic": 569},
+    {"name": "Route569 363", "source_chat": -1003860051934, "source_topic": 363, "dest_chat": -1003918958200, "dest_topic": 569},
+    {"name": "Route569 412", "source_chat": -1003860051934, "source_topic": 412, "dest_chat": -1003918958200, "dest_topic": 569},
+
+    # Auto-added 2026-05-31: whole-source routes
+    {"name": "Route570", "source_chat": -1003671770570, "source_topic": None, "dest_chat": -1003918958200, "dest_topic": 570},
+    {"name": "Route567", "source_chat": -1003801452999, "source_topic": None, "dest_chat": -1003918958200, "dest_topic": 567},
+
+    # Auto-added 2026-05-31: all requested topics from -1003788774930 to -1003918958200_568
+    {"name": "Route568 1", "source_chat": -1003788774930, "source_topic": 1, "dest_chat": -1003918958200, "dest_topic": 568},
+    {"name": "Route568 432", "source_chat": -1003788774930, "source_topic": 432, "dest_chat": -1003918958200, "dest_topic": 568},
+    {"name": "Route568 433", "source_chat": -1003788774930, "source_topic": 433, "dest_chat": -1003918958200, "dest_topic": 568},
+    {"name": "Route568 437", "source_chat": -1003788774930, "source_topic": 437, "dest_chat": -1003918958200, "dest_topic": 568},
+    {"name": "Route568 438", "source_chat": -1003788774930, "source_topic": 438, "dest_chat": -1003918958200, "dest_topic": 568},
+    {"name": "Route568 476", "source_chat": -1003788774930, "source_topic": 476, "dest_chat": -1003918958200, "dest_topic": 568},
+    {"name": "Route568 447", "source_chat": -1003788774930, "source_topic": 447, "dest_chat": -1003918958200, "dest_topic": 568},
+    {"name": "Route568 1201", "source_chat": -1003788774930, "source_topic": 1201, "dest_chat": -1003918958200, "dest_topic": 568},
+    {"name": "Route568 461", "source_chat": -1003788774930, "source_topic": 461, "dest_chat": -1003918958200, "dest_topic": 568},
+    {"name": "Route568 463", "source_chat": -1003788774930, "source_topic": 463, "dest_chat": -1003918958200, "dest_topic": 568},
+    {"name": "Route568 459", "source_chat": -1003788774930, "source_topic": 459, "dest_chat": -1003918958200, "dest_topic": 568},
+    {"name": "Route568 457", "source_chat": -1003788774930, "source_topic": 457, "dest_chat": -1003918958200, "dest_topic": 568},
+    {"name": "Route568 455", "source_chat": -1003788774930, "source_topic": 455, "dest_chat": -1003918958200, "dest_topic": 568},
+    {"name": "Route568 453", "source_chat": -1003788774930, "source_topic": 453, "dest_chat": -1003918958200, "dest_topic": 568},
+    {"name": "Route568 451", "source_chat": -1003788774930, "source_topic": 451, "dest_chat": -1003918958200, "dest_topic": 568},
+    {"name": "Route568 449", "source_chat": -1003788774930, "source_topic": 449, "dest_chat": -1003918958200, "dest_topic": 568},
+    {"name": "Route568 445", "source_chat": -1003788774930, "source_topic": 445, "dest_chat": -1003918958200, "dest_topic": 568},
+    {"name": "Route568 443", "source_chat": -1003788774930, "source_topic": 443, "dest_chat": -1003918958200, "dest_topic": 568},
 ]
 
 if os.environ.get("DISABLE_PROVIDER_ROUTES", "0").strip() == "1":
