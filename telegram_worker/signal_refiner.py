@@ -74,9 +74,31 @@ def is_hybrid_signal(text: str) -> bool:
 
 def price(x) -> str:
     x = float(x)
+    ax = abs(x)
+
+    # Forex-style prices: keep 5 decimals, e.g. EURUSD 1.08750
+    if ax < 10:
+        return f"{x:.5f}"
+
+    # JPY/metal/smaller symbols: keep 3 decimals, e.g. GBPJPY 191.500
+    if ax < 1000:
+        return f"{x:.3f}"
+
+    # Indices/gold/crypto large prices
     if abs(x - int(x)) < 0.00001:
         return str(int(x))
     return (f"{x:.2f}").rstrip("0").rstrip(".")
+
+
+def display_symbol(symbol: str) -> str:
+    s = (symbol or "").upper()
+    if s in ("NAS100", "US100", "NASDAQ", "NASDAQ100"):
+        return "NASDAQ 100"
+    if s in ("US500", "SPX500", "SP500"):
+        return "US500"
+    if s in ("GER40", "DAX", "DAX40"):
+        return "GER40"
+    return s
 
 
 def compact_range(high, low) -> str:
@@ -156,9 +178,9 @@ def auto_risk(symbol: str, direction: str, entry_low: float, entry_high: float, 
             return "MEDIUM"
         return "HIGH"
     if fam == "FOREX":
-        if pct <= 0.001:
+        if pct <= 0.0015:
             return "LOW"
-        if pct <= 0.0025:
+        if pct <= 0.005:
             return "MEDIUM"
         return "HIGH"
 
@@ -282,7 +304,7 @@ def claude_parse(text: str) -> Optional[Dict[str, Any]]:
 def build_message(sig: Dict[str, Any]) -> str:
     direction = sig["direction"].upper()
     symbol_raw = sig.get("symbol", "XAUUSD").upper()
-    symbol = esc(symbol_raw)
+    symbol = esc(display_symbol(symbol_raw))
     lo = float(sig["entry_low"])
     hi = float(sig["entry_high"])
     sl = float(sig["sl"])

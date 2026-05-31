@@ -236,6 +236,7 @@ async def send_full_signal(message, result, key, original_text, forward_raw=True
 
     try:
         if forward_raw:
+            if forward_raw:
             await forward_original(message, original_text)
         await client.send_message(SIGNAL_DEST_CHAT, result["message"], parse_mode="html", link_preview=False)
         if SEND_SOURCE_LINE:

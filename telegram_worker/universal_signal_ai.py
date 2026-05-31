@@ -481,3 +481,190 @@ def regex_extract(text: str) -> Optional[Dict[str, Any]]:
         "risk": risk_from_text(up, symbol, mid, sl),
         "layer_point": estimate_layer(direction, entry[0], entry[1], sl),
     }
+
+
+# =========================
+# FINAL OVERRIDES: all-pair parser, edited-message safe, fixed TP parsing
+# =========================
+
+_PRICE_ANY = r"\d{1,7}(?:\.\d+)?"
+_FOREX_CURRENCIES = {"EUR","USD","GBP","JPY","AUD","NZD","CAD","CHF"}
+_IGNORE_SYMBOLS = {"ENTRY","TARGET","AROUND","SIGNAL","SHORTS","LONGS","SELLING","BUYING","UPDATE","PROFIT","LOSSES","MANAGE"}
+
+
+def normalize_symbol(symbol: str, text: str = "") -> str:
+    raw = (text or "").upper()
+    t = raw.replace("/", "").replace("-", "")
+    s = (symbol or "").upper().replace("/", "").replace("-", "").replace(" ", "")
+
+    if "NASDAQ 100" in raw or "NASDAQ100" in t or "NAS100" in t or "US100" in t or re.search(r"\bNAS\b", t):
+        return "NAS100"
+    if "US30" in t or "DOW" in t:
+        return "US30"
+    if "US500" in t or "SPX500" in t or "SP500" in t or "S&P" in raw:
+        return "US500"
+    if "GER40" in t or "DAX" in t:
+        return "GER40"
+
+    if "BTC" in t or "BITCOIN" in t:
+        return "BTCUSD"
+    if "ETH" in t or "ETHEREUM" in t:
+        return "ETHUSD"
+    if "SOL" in t or "SOLANA" in t:
+        return "SOLUSD"
+
+    if "XAU" in t or "GOLD" in t:
+        return "XAUUSD"
+    if "XAG" in t or "SILVER" in t:
+        return "XAGUSD"
+
+    # Any normal forex pair, e.g. EURUSD, GBPJPY, AUDCAD
+    for m in re.finditer(r"\b([A-Z]{6})\b", t):
+        pair = m.group(1)
+        if pair in _IGNORE_SYMBOLS:
+            continue
+        if pair[:3] in _FOREX_CURRENCIES and pair[3:] in _FOREX_CURRENCIES:
+            return pair
+
+    if s and s not in _IGNORE_SYMBOLS:
+        return s
+
+    return "XAUUSD"
+
+
+def looks_like_signal(text: str) -> bool:
+    t = clean(text).upper()
+    has_price = bool(re.search(rf"\b{_PRICE_ANY}\b", t))
+    has_action = bool(re.search(r"\b(BUY|BUYS|BUYING|SELL|SELLS|SELLING|LONG|LONGS|SHORT|SHORTS|ENTERING|ENTRY|LIMIT)\b", t))
+    has_trade_word = bool(re.search(r"\b(SL|S/L|STOP|STOPLOSS|STOP\s*LOSS|TP\s*\d*|TARGET|TAKE\s*PROFIT|ENTRY|ENTRIES|LIMIT|ZONE|RISK|RISKY)\b", t))
+    return has_price and (has_action or has_trade_word)
+
+
+def risk_from_text(text: str, symbol: str, entry: float, sl: float) -> str:
+    t = (text or "").upper()
+    if "RISKY" in t or "HIGHER RISK" in t or "HIGH RISK" in t or "VERY HIGH" in t:
+        return "HIGH"
+    if "MEDIUM RISK" in t:
+        return "MEDIUM"
+    if "LOW RISK" in t:
+        return "LOW"
+
+    distance = abs(float(entry) - float(sl))
+    pct = distance / float(entry) if entry else 999
+    fam = symbol_family(symbol)
+
+    if fam == "GOLD":
+        return "LOW" if distance <= 8 else "MEDIUM" if distance <= 18 else "HIGH"
+    if fam == "CRYPTO":
+        return "LOW" if pct <= 0.003 else "MEDIUM" if pct <= 0.008 else "HIGH"
+    if fam == "INDEX":
+        return "LOW" if pct <= 0.0025 else "MEDIUM" if pct <= 0.006 else "HIGH"
+    if fam == "FOREX":
+        return "LOW" if pct <= 0.0015 else "MEDIUM" if pct <= 0.005 else "HIGH"
+
+    return "LOW" if pct <= 0.003 else "MEDIUM" if pct <= 0.007 else "HIGH"
+
+
+def _direction_any(up: str):
+    if re.search(r"\b(BUY|BUYS|BUYING|LONG|LONGS)\b", up):
+        return "BUY"
+    if re.search(r"\b(SELL|SELLS|SELLING|SHORT|SHORTS)\b", up):
+        return "SELL"
+    return None
+
+
+def _entry_any(up: str):
+    patterns = [
+        rf"\b(?:ENTRY|ENTRIES|ENTER|ENTERING)\b(?:\s+(?:AROUND|AT|NOW))?\s*[:\-]?\s*({_PRICE_ANY})\s*(?:-|TO|/)?\s*({_PRICE_ANY})?",
+        rf"\b(?:BUY|BUYS|BUYING|SELL|SELLS|SELLING|LONG|LONGS|SHORT|SHORTS)\b(?:\s+(?:NOW|LIMIT|STOP|ZONE|AT|AROUND))*\D{{0,80}}({_PRICE_ANY})\s*(?:-|TO|/)\s*({_PRICE_ANY})",
+        rf"\b(?:BUY|BUYS|BUYING|SELL|SELLS|SELLING|LONG|LONGS|SHORT|SHORTS)\b(?:\s+(?:NOW|LIMIT|STOP|ZONE|AT|AROUND))*\D{{0,80}}({_PRICE_ANY})",
+    ]
+    for pat in patterns:
+        m = re.search(pat, up)
+        if m:
+            a = float(m.group(1))
+            b = float(m.group(2)) if len(m.groups()) > 1 and m.group(2) else a
+            return min(a, b), max(a, b)
+    return None
+
+
+def _sl_any(up: str):
+    vals = []
+    for pat in [
+        rf"\b(?:SL|S/L|STOP\s*LOSS|STOPLOSS|STOP)\b(?:\s+TO)?\s*[:\-]?\s*({_PRICE_ANY})",
+        rf"\bSET\s+YOUR\s+STOP\s+LOSS\s+TO\s*({_PRICE_ANY})",
+    ]:
+        vals += [float(x) for x in re.findall(pat, up)]
+    return vals[-1] if vals else None
+
+
+def _tps_any(text: str):
+    vals = []
+    tp_open = False
+
+    for line in text.splitlines():
+        u = line.upper().strip()
+
+        if not re.search(r"\b(TP|TARGET|TAKE\s*PROFIT)\b", u):
+            continue
+
+        if re.search(r"\bOPEN\b", u):
+            tp_open = True
+            continue
+
+        nums = re.findall(_PRICE_ANY, u)
+        if not nums:
+            continue
+
+        # Fixes TP1(4513), TP2 18550, TP #3: 1.08000
+        # but does NOT break TP 18500.
+        if re.search(r"\bTP\s*#?\s*\d+\b", u) and len(nums) > 1:
+            try:
+                if float(nums[0]) <= 20:
+                    nums = nums[1:]
+            except Exception:
+                pass
+
+        if nums:
+            v = float(nums[0])
+            if v not in vals:
+                vals.append(v)
+
+    return vals, tp_open
+
+
+def regex_extract(text: str) -> Optional[Dict[str, Any]]:
+    raw = clean(text).replace("–", "-").replace("—", "-")
+    up = raw.upper()
+
+    if not looks_like_signal(up):
+        return None
+
+    direction = _direction_any(up)
+    if not direction:
+        return None
+
+    symbol = normalize_symbol("", raw)
+    entry = _entry_any(up)
+    sl = _sl_any(up)
+    tps, tp_open = _tps_any(raw)
+
+    if entry is None or sl is None:
+        return None
+    if not tps and not tp_open:
+        return None
+
+    mid = (entry[0] + entry[1]) / 2
+
+    return {
+        "is_signal": True,
+        "symbol": symbol,
+        "direction": direction,
+        "entry_low": entry[0],
+        "entry_high": entry[1],
+        "sl": sl,
+        "tps": estimate_tps(symbol, direction, mid, sl, tps, tp_open),
+        "tp_open": True,
+        "risk": risk_from_text(up, symbol, mid, sl),
+        "layer_point": estimate_layer(direction, entry[0], entry[1], sl),
+    }
