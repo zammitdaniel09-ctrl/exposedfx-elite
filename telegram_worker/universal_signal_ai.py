@@ -90,8 +90,109 @@ def looks_like_signal(text: str) -> bool:
     return has_price and (has_action or has_trade_word or has_symbol)
 
 
+def forex_pip_size(symbol: str) -> float:
+    s = (symbol or "").upper().replace("/", "")
+    return 0.01 if s.endswith("JPY") else 0.0001
+
+
+def forex_risk_thresholds(symbol: str) -> tuple[float, float]:
+    """Return LOW/MEDIUM limits in pips for each FX pair style."""
+    s = (symbol or "").upper().replace("/", "")
+
+    # JPY crosses naturally move more in absolute pip count.
+    if s.endswith("JPY"):
+        if s in {"GBPJPY", "EURJPY"}:
+            return 35, 80
+        return 25, 60
+
+    # GBP pairs usually need more breathing room than EUR/USD majors.
+    if s.startswith("GBP") or s.endswith("GBP"):
+        return 20, 55
+
+    # Standard majors/minors.
+    if s in {"EURUSD", "USDCHF", "USDCAD", "AUDUSD", "NZDUSD", "EURGBP", "AUDCAD", "AUDNZD"}:
+        return 15, 40
+
+    return 20, 50
+
+
+def percentage_risk_thresholds(symbol: str) -> tuple[float, float]:
+    """Return LOW/MEDIUM limits as decimals, e.g. 0.003 = 0.30%."""
+    s = (symbol or "").upper().replace("/", "")
+    fam = symbol_family(s)
+
+    # Crypto pair-specific thresholds.
+    if s.startswith("BTC"):
+        return 0.0035, 0.0090
+    if s.startswith("ETH"):
+        return 0.0045, 0.0120
+    if s.startswith("SOL"):
+        return 0.0075, 0.0180
+    if s.startswith("XRP"):
+        return 0.0100, 0.0250
+
+    # Indices pair-specific thresholds.
+    if s in {"NAS100", "US100"}:
+        return 0.0025, 0.0065
+    if s == "US30":
+        return 0.0020, 0.0055
+    if s in {"US500", "SPX500", "SP500"}:
+        return 0.0020, 0.0050
+    if s in {"GER40", "DAX", "DAX40"}:
+        return 0.0025, 0.0060
+
+    # Metals except gold are better judged by percentage.
+    if s.startswith("XAG"):
+        return 0.0040, 0.0100
+
+    if fam == "CRYPTO":
+        return 0.0040, 0.0100
+    if fam == "INDEX":
+        return 0.0025, 0.0060
+    if fam == "METAL":
+        return 0.0040, 0.0100
+    return 0.0030, 0.0070
+
+
+def dynamic_risk(symbol: str, entry: float, sl: float) -> str:
+    symbol = (symbol or "").upper().replace("/", "")
+    entry = float(entry)
+    sl = float(sl)
+    distance = abs(entry - sl)
+    pct = distance / entry if entry else 999
+    fam = symbol_family(symbol)
+
+    # Gold uses direct dollar distance because that is how XAU traders think.
+    if fam == "GOLD":
+        if distance <= 6:
+            return "LOW"
+        if distance <= 15:
+            return "MEDIUM"
+        return "HIGH"
+
+    # Forex uses pips, not raw price percentage.
+    if fam == "FOREX":
+        pip_size = forex_pip_size(symbol)
+        pips = distance / pip_size
+        low_pips, medium_pips = forex_risk_thresholds(symbol)
+        if pips <= low_pips:
+            return "LOW"
+        if pips <= medium_pips:
+            return "MEDIUM"
+        return "HIGH"
+
+    low_pct, medium_pct = percentage_risk_thresholds(symbol)
+    if pct <= low_pct:
+        return "LOW"
+    if pct <= medium_pct:
+        return "MEDIUM"
+    return "HIGH"
+
+
 def risk_from_text(text: str, symbol: str, entry: float, sl: float) -> str:
     t = (text or "").upper()
+
+    # Provider explicit warnings override the calculation.
     if "RISKY" in t or "HIGHER RISK" in t or "HIGH RISK" in t or "VERY HIGH" in t:
         return "HIGH"
     if "MEDIUM RISK" in t:
@@ -99,21 +200,7 @@ def risk_from_text(text: str, symbol: str, entry: float, sl: float) -> str:
     if "LOW RISK" in t:
         return "LOW"
 
-    distance = abs(float(entry) - float(sl))
-    pct = distance / float(entry) if entry else 999
-    fam = symbol_family(symbol)
-
-    if fam == "GOLD":
-        return "LOW" if distance <= 8 else "MEDIUM" if distance <= 18 else "HIGH"
-    if fam == "METAL":
-        return "LOW" if pct <= 0.004 else "MEDIUM" if pct <= 0.010 else "HIGH"
-    if fam == "CRYPTO":
-        return "LOW" if pct <= 0.003 else "MEDIUM" if pct <= 0.008 else "HIGH"
-    if fam == "INDEX":
-        return "LOW" if pct <= 0.0025 else "MEDIUM" if pct <= 0.006 else "HIGH"
-    if fam == "FOREX":
-        return "LOW" if pct <= 0.0015 else "MEDIUM" if pct <= 0.005 else "HIGH"
-    return "LOW" if pct <= 0.003 else "MEDIUM" if pct <= 0.007 else "HIGH"
+    return dynamic_risk(symbol, entry, sl)
 
 
 def estimate_layer(direction: str, entry_low: float, entry_high: float, sl: float) -> float:
@@ -224,7 +311,6 @@ def extract_tps(text: str) -> tuple[list[float], bool]:
         nums = re.findall(PRICE_RE, u)
         if not nums:
             continue
-        # Use last number: TP1 1.08550 -> 1.08550, TP1(4513) -> 4513, TP 18500 -> 18500.
         v = float(nums[-1])
         if v not in vals:
             vals.append(v)
@@ -292,6 +378,7 @@ def claude_extract(text: str) -> Optional[Dict[str, Any]]:
         "A complete signal needs direction, entry, and stop loss. If no TP is provided, treat it as TP open so targets can be estimated. "
         "Use latest/current stop loss if several are shown. "
         "For TP open with no numbers, return tps=[] and tp_open=true. "
+        "Do not decide risk unless the text explicitly says low risk, medium risk, high risk, higher risk, risky, or very high. Otherwise leave risk empty so the system calculates risk dynamically by pair. "
         "Return: is_signal, symbol, direction, entry_low, entry_high, sl, tps, tp_open, risk."
     )
     try:
@@ -341,8 +428,10 @@ def claude_extract(text: str) -> Optional[Dict[str, Any]]:
             else:
                 return None
         mid = (entry_low + entry_high) / 2
-        risk = str(obj.get("risk", "")).upper()
-        if risk not in ("LOW", "MEDIUM", "HIGH"):
+        explicit_risk = str(obj.get("risk", "")).upper()
+        if explicit_risk in ("LOW", "MEDIUM", "HIGH") and any(x in clean(text).upper() for x in ("LOW RISK", "MEDIUM RISK", "HIGH RISK", "HIGHER RISK", "VERY HIGH", "RISKY")):
+            risk = explicit_risk
+        else:
             risk = risk_from_text(text, symbol, mid, sl)
         return {
             "is_signal": True,
