@@ -28,7 +28,6 @@ def normalize_symbol(symbol: str, text: str = "") -> str:
     t = raw.replace("/", "").replace("-", "").replace(" ", "")
     s = (symbol or "").upper().replace("/", "").replace("-", "").replace(" ", "")
 
-    # Indices first, before forex/metals.
     if "NASDAQ100" in t or "NASDAQ" in raw or "NAS100" in t or "US100" in t or re.search(r"\bNAS\b", raw):
         return "NAS100"
     if "US30" in t or "DOW" in raw:
@@ -40,7 +39,6 @@ def normalize_symbol(symbol: str, text: str = "") -> str:
     if "UK100" in t:
         return "UK100"
 
-    # Crypto.
     if "BTC" in t or "BITCOIN" in raw or s in {"BTC", "BTCUSD", "BTCUSDT"}:
         return "BTCUSD"
     if "ETH" in t or "ETHEREUM" in raw or s in {"ETH", "ETHUSD", "ETHUSDT"}:
@@ -50,13 +48,11 @@ def normalize_symbol(symbol: str, text: str = "") -> str:
     if "XRP" in t:
         return "XRPUSD"
 
-    # Metals.
     if "XAU" in t or "GOLD" in raw or s in {"XAU", "XAUUSD", "GOLD"}:
         return "XAUUSD"
     if "XAG" in t or "SILVER" in raw or s in {"XAG", "XAGUSD", "SILVER"}:
         return "XAGUSD"
 
-    # Any normal forex pair: EURUSD, GBPJPY, AUDCAD, etc.
     for m in re.finditer(r"\b([A-Z]{6})\b", raw.replace("/", "")):
         pair = m.group(1)
         if pair in IGNORE_SYMBOLS:
@@ -88,7 +84,7 @@ def looks_like_signal(text: str) -> bool:
     t = clean(text).upper()
     has_price = bool(re.search(rf"\b{PRICE_RE}\b", t))
     has_action = bool(re.search(r"\b(BUY|BUYS|BUYING|SELL|SELLS|SELLING|LONG|LONGS|SHORT|SHORTS|ENTERING|ENTRY|LIMIT)\b", t))
-    has_trade_word = bool(re.search(r"\b(SL|S/L|STOP|STOPLOSS|STOP\s*LOSS|TP\s*\d*|TARGET|TAKE\s*PROFIT|ENTRY|ENTRIES|LIMIT|ZONE|RISK|RISKY)\b", t))
+    has_trade_word = bool(re.search(r"\b(SL|S/L|STOP|STOPLOSS|STOP\s*LOSS|TP\s*#?\s*\d*|TARGET\s*#?\s*\d*|TAKE\s*PROFIT|ENTRY|ENTRIES|LIMIT|ZONE|RISK|RISKY)\b", t))
     has_symbol = bool(re.search(r"\b(XAUUSD|XAGUSD|GOLD|SILVER|BTC|ETH|SOL|NAS100|NASDAQ|US100|US30|US500|GER40|DAX|[A-Z]{6})\b", t))
     return has_price and (has_action or has_trade_word or has_symbol)
 
@@ -185,8 +181,6 @@ def direction_from_text(text: str) -> Optional[str]:
 
 def extract_entry(text: str) -> Optional[tuple[float, float]]:
     up = text.upper().replace("–", "-").replace("—", "-")
-
-    # Prefer explicit entry lines.
     patterns = [
         rf"\b(?:ENTRY|ENTRIES|ENTER|ENTERING)\b(?:\s+(?:AROUND|AT|NOW))?\s*[:\-]?\s*({PRICE_RE})\s*(?:-|TO|/)\s*({PRICE_RE})",
         rf"\b(?:ENTRY|ENTRIES|ENTER|ENTERING)\b(?:\s+(?:AROUND|AT|NOW))?\s*[:\-]?\s*({PRICE_RE})",
@@ -217,9 +211,11 @@ def extract_sl(text: str) -> Optional[float]:
 def extract_tps(text: str) -> tuple[list[float], bool]:
     vals = []
     tp_open = False
+    tp_line_re = re.compile(r"\b(?:TP\s*#?\s*\d*|TARGET\s*#?\s*\d*|TAKE\s*PROFIT\s*#?\s*\d*)\b", re.I)
+
     for line in clean(text).splitlines():
         u = line.upper().strip()
-        if not re.search(r"\b(TP|TARGET|TAKE\s*PROFIT)\b", u):
+        if not tp_line_re.search(u):
             continue
         if re.search(r"\bOPEN\b", u):
             tp_open = True
@@ -227,7 +223,7 @@ def extract_tps(text: str) -> tuple[list[float], bool]:
         nums = re.findall(PRICE_RE, u)
         if not nums:
             continue
-        # For TP1 1.08550 or TP1(4513), use the last number on the TP line.
+        # Use last number: TP1 1.08550 -> 1.08550, TP1(4513) -> 4513, TP 18500 -> 18500.
         v = float(nums[-1])
         if v not in vals:
             vals.append(v)
