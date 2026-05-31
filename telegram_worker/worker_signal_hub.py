@@ -11,6 +11,7 @@ from telethon import events
 from telegram_worker.worker_fixed import client, stats
 from telegram_worker.admin_features import ADMIN_CHAT, admin_startup, admin_loop, handle_admin_command
 from telegram_worker.signal_refiner import refine_signal
+from telegram_worker.force_formatter import force_format
 
 log = logging.getLogger("exposedfx-ai-signal-formatter")
 
@@ -240,9 +241,13 @@ async def send_result(message, result, key):
         log.info("[signal hub skipped] duplicate formatted signal")
         return False
 
-    await client.send_message(SIGNAL_DEST_CHAT, result["message"], parse_mode="html", link_preview=False)
-    if SEND_SOURCE_LINE:
-        await client.send_message(SIGNAL_DEST_CHAT, result["source"], parse_mode="html", link_preview=False)
+    try:
+        await client.send_message(SIGNAL_DEST_CHAT, result["message"], parse_mode="html", link_preview=False)
+        if SEND_SOURCE_LINE:
+            await client.send_message(SIGNAL_DEST_CHAT, result["source"], parse_mode="html", link_preview=False)
+    except Exception as exc:
+        log.exception(f"[signal hub formatted send failed] {exc}")
+        return False
 
     buffers[key].clear()
     log.info(f"[signal hub sent] source_msg={message.id} topic={topic_id_of(message)} -> {SIGNAL_DEST_CHAT}")
@@ -267,7 +272,7 @@ async def on_signal_hub_message(event):
         if looks_like_signal_candidate(text):
             await forward_original(message, text)
 
-        result = refine_signal(text, source_name, message.id)
+        result = refine_signal(text, source_name, message.id) or force_format(text, source_name, message.id)
         if result:
             await send_result(message, result, key)
             return
@@ -278,7 +283,7 @@ async def on_signal_hub_message(event):
 
         buffers[key].append({"ts": time.time(), "id": message.id, "text": text})
         combined = combined_text_for(key)
-        result = refine_signal(combined, source_name, message.id)
+        result = refine_signal(combined, source_name, message.id) or force_format(combined, source_name, message.id)
         if result:
             await send_result(message, result, key)
             return
