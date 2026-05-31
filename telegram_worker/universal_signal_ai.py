@@ -110,10 +110,7 @@ def estimate_layer(direction: str, entry_low: float, entry_high: float, sl: floa
     return (entry + stop) / 2
 
 
-def tp_step(symbol: str, direction: str, entry: float, sl: float, first_tp: Optional[float] = None) -> float:
-    if first_tp is not None and abs(float(first_tp) - float(entry)) > 0:
-        return abs(float(first_tp) - float(entry))
-
+def fallback_step(symbol: str, entry: float, sl: float) -> float:
     risk_distance = abs(float(entry) - float(sl))
     fam = symbol_family(symbol)
     if fam == "CRYPTO":
@@ -128,21 +125,40 @@ def tp_step(symbol: str, direction: str, entry: float, sl: float, first_tp: Opti
 
 
 def estimate_tps(symbol: str, direction: str, entry: float, sl: float, tps: list[float], tp_open: bool = False) -> list[float]:
+    """
+    TP rules:
+    - If TP is Open with no numeric TPs, estimate TP1-TP8 by R multiples:
+      TP1 = 0.5R, TP2 = 1R, then TP3-TP8 = 2R-7R.
+    - If the provider sends numeric TPs, keep them exactly.
+      If fewer than 8 are sent, extend the rest using the original TP spacing.
+    """
     cleaned = [float(x) for x in tps if x is not None]
+    entry = float(entry)
+    sl = float(sl)
+    sign = 1 if direction == "BUY" else -1
+    risk_distance = abs(entry - sl)
+
     if len(cleaned) >= 8:
         return cleaned[:8]
 
-    first_tp = cleaned[0] if cleaned else None
-    step = tp_step(symbol, direction, entry, sl, first_tp)
-    start = first_tp if first_tp is not None else float(entry)
+    if not cleaned:
+        if not tp_open:
+            return []
+        multipliers = [0.5, 1, 2, 3, 4, 5, 6, 7]
+        return [entry + sign * risk_distance * r for r in multipliers]
 
     out = cleaned[:]
+
+    if len(cleaned) >= 2:
+        step = abs(cleaned[-1] - cleaned[-2])
+    else:
+        step = abs(cleaned[0] - entry)
+
+    if step <= 0:
+        step = fallback_step(symbol, entry, sl)
+
     while len(out) < 8:
-        if not out:
-            next_tp = start + step if direction == "BUY" else start - step
-        else:
-            next_tp = out[-1] + step if direction == "BUY" else out[-1] - step
-        out.append(next_tp)
+        out.append(out[-1] + sign * step)
 
     return out[:8]
 
@@ -172,7 +188,7 @@ def claude_extract(text: str) -> Optional[Dict[str, Any]]:
         "Need direction, symbol, entry, stop loss, and either numeric take profits or TP open. "
         "If multiple stop losses are present, use the latest/current one, especially phrases like 'set your stop loss to'. "
         "If TP is Open with no number, set tps to [] and tp_open to true. "
-        "If only one numeric TP is given, keep that TP; the system will estimate the rest. "
+        "If numeric TPs are given, extract only the numeric TPs exactly as written; the system will extend missing TPs. "
         "Return keys: is_signal, symbol, direction, entry_low, entry_high, sl, tps, tp_open, risk. "
         "direction must be BUY or SELL. risk may be LOW, MEDIUM, HIGH, or empty."
     )
