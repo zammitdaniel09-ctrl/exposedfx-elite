@@ -3,6 +3,9 @@ import json
 import base64
 import asyncio
 import logging
+import time
+import re
+import hashlib
 from pathlib import Path
 
 import requests
@@ -33,6 +36,8 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 SESSION_BASE = DATA_DIR / "session"
 SESSION_FILE = DATA_DIR / "session.session"
 MESSAGE_MAP_FILE = DATA_DIR / "message_map.json"
+DEDUP_FILE = DATA_DIR / "dedupe_map.json"
+DEDUP_WINDOW_SECONDS = int(os.environ.get("DEDUP_WINDOW_SECONDS", "900"))
 
 SOURCE_CHATS = sorted(set(r["source_chat"] for r in ROUTES))
 POSTED_SIGNAL_KEYS = set()
@@ -101,8 +106,105 @@ def save_map():
     tmp.replace(MESSAGE_MAP_FILE)
 
 
+
+def load_dedupe():
+    if not DEDUP_FILE.exists():
+        return {}
+    try:
+        return json.loads(DEDUP_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def save_dedupe():
+    try:
+        cutoff = time.time() - DEDUP_WINDOW_SECONDS
+        old = list(content_dedupe_map.keys())
+        for k in old:
+            if float(content_dedupe_map.get(k, 0)) < cutoff:
+                content_dedupe_map.pop(k, None)
+
+        tmp = DEDUP_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(content_dedupe_map), encoding="utf-8")
+        tmp.replace(DEDUP_FILE)
+    except Exception as exc:
+        log.warning(f"[dedupe save failed] {exc}")
+
+
+def normalise_for_dedupe(text):
+    text = (text or "").lower()
+    text = text.replace("\\ufe0f", "").replace("\\u200d", "").replace("\\u200b", "")
+    text = re.sub(r"\\s+", "", text)
+    return text.strip()
+
+
+def media_tag(message):
+    if not getattr(message, "media", None):
+        return "no-media"
+
+    # Keep albums/screenshots safer: exact duplicate media/text gets blocked,
+    # different images with same caption can still pass.
+    media_id = getattr(getattr(message, "photo", None), "id", None)
+    if media_id:
+        return f"photo:{media_id}"
+
+    document = getattr(message, "document", None)
+    if document:
+        return f"doc:{getattr(document, 'id', '')}:{getattr(document, 'size', '')}"
+
+    return "media"
+
+
+def dedupe_key(route, message, text):
+    base = "|".join([
+        str(route["source_chat"]),
+        str(route.get("source_topic")),
+        str(route["dest_chat"]),
+        str(route["dest_topic"]),
+        normalise_for_dedupe(text),
+        media_tag(message),
+    ])
+    return hashlib.sha256(base.encode("utf-8", errors="ignore")).hexdigest()
+
+
+def is_recent_duplicate(route, message, text):
+    key = dedupe_key(route, message, text)
+    last = float(content_dedupe_map.get(key, 0) or 0)
+    return (time.time() - last) <= DEDUP_WINDOW_SECONDS
+
+
+def remember_dedupe(route, message, text):
+    key = dedupe_key(route, message, text)
+    content_dedupe_map[key] = time.time()
+    save_dedupe()
+
+
+def existing_destination_id(message, route):
+    key = map_key(route["source_chat"], message.id, route["dest_chat"], route["dest_topic"])
+    mapped = message_map.get(key)
+    try:
+        return int(mapped) if mapped else None
+    except Exception:
+        return None
+
+
+async def delete_existing_destination(message, route):
+    existing = existing_destination_id(message, route)
+    if not existing:
+        return False
+    try:
+        await client.delete_messages(route["dest_chat"], existing)
+        log.info(f"[edited cleanup] deleted old forwarded msg {existing} for source {message.id}")
+        return True
+    except Exception as exc:
+        log.warning(f"[edited cleanup failed] source={message.id} dest_msg={existing}: {exc}")
+        return False
+
+
+
 write_login_file()
 message_map = load_map()
+content_dedupe_map = load_dedupe()
 client = TelegramClient(str(SESSION_BASE), API_ID, API_HASH)
 
 
@@ -284,7 +386,10 @@ def maybe_post_signal(route, message, text):
         log.error(f"[signal post failed] {route['name']}: {exc}")
 
 
-async def copy_one(message, route):
+async def copy_one(message, route, edited=False):
+    if edited:
+        await delete_existing_destination(message, route)
+
     target_reply = reply_target(message, route)
     text = text_of(message)
     entities = entities_of(message)
@@ -355,9 +460,7 @@ async def copy_album(messages, route):
         remember_message(first, sent, route)
 
 
-@client.on(events.NewMessage(chats=SOURCE_CHATS))
-@client.on(events.MessageEdited(chats=SOURCE_CHATS))
-async def on_message(event):
+async def handle_single_message(event, edited=False):
     message = event.message
     if getattr(message, "grouped_id", None):
         return
@@ -370,19 +473,41 @@ async def on_message(event):
         return
 
     text = text_of(message)
+
     for route in routes:
         try:
-            await copy_one(message, route)
+            if not edited and is_recent_duplicate(route, message, text):
+                log.info(f"[duplicate skipped] {route['name']} source={chat_id}_{topic_id} msg={message.id}")
+                continue
+
+            await copy_one(message, route, edited=edited)
+            remember_dedupe(route, message, text)
+
             if text:
                 maybe_post_signal(route, message, text)
                 log_stats(route, message, text)
+
             direction = "outgoing" if getattr(message, "out", False) else "incoming"
-            log.info(f"[copied:{direction}] {route['name']} source={chat_id}_{topic_id} -> dest={route['dest_chat']}_{route['dest_topic']}")
+            edit_tag = ":edited" if edited else ""
+            log.info(f"[copied{edit_tag}:{direction}] {route['name']} source={chat_id}_{topic_id} -> dest={route['dest_chat']}_{route['dest_topic']}")
+
         except FloodWaitError as exc:
             log.warning(f"FloodWait {exc.seconds}s")
             await asyncio.sleep(min(exc.seconds + 1, 60))
+
         except Exception as exc:
             log.error(f"[copy failed] {route['name']}: {exc}")
+
+
+@client.on(events.NewMessage(chats=SOURCE_CHATS))
+async def on_message(event):
+    await handle_single_message(event, edited=False)
+
+
+@client.on(events.MessageEdited(chats=SOURCE_CHATS))
+async def on_message_edited(event):
+    if FORWARD_EDITED_MESSAGES:
+        await handle_single_message(event, edited=True)
 
 
 @client.on(events.Album(chats=SOURCE_CHATS))
@@ -405,7 +530,13 @@ async def on_album(event):
 
     for route in routes:
         try:
+            if text and is_recent_duplicate(route, first, text):
+                log.info(f"[album duplicate skipped] {route['name']} source={chat_id}_{topic_id} items={len(event.messages)}")
+                continue
+
             await copy_album(event.messages, route)
+            if text:
+                remember_dedupe(route, first, text)
             if text:
                 maybe_post_signal(route, first, text)
                 log_stats(route, first, text)
@@ -428,6 +559,7 @@ async def main():
     log.info(f"Watching {len(SOURCE_CHATS)} source chats: {SOURCE_CHATS}")
     log.info(f"Loaded {len(ROUTES)} routes")
     log.info(f"FORWARD_EDITED_MESSAGES={FORWARD_EDITED_MESSAGES}")
+    log.info(f"DEDUP_WINDOW_SECONDS={DEDUP_WINDOW_SECONDS}")
     log.info("Imperium fixed Telegram worker running...")
     asyncio.create_task(stats.loop(client))
     log.info("Weekly stats reporter running for Sunday 00:00 Europe/Malta")
