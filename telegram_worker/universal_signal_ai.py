@@ -96,32 +96,24 @@ def forex_pip_size(symbol: str) -> float:
 
 
 def forex_risk_thresholds(symbol: str) -> tuple[float, float]:
-    """Return LOW/MEDIUM limits in pips for each FX pair style."""
+    """Return tight/medium limits in pips for each FX pair style."""
     s = (symbol or "").upper().replace("/", "")
-
-    # JPY crosses naturally move more in absolute pip count.
     if s.endswith("JPY"):
         if s in {"GBPJPY", "EURJPY"}:
             return 35, 80
         return 25, 60
-
-    # GBP pairs usually need more breathing room than EUR/USD majors.
     if s.startswith("GBP") or s.endswith("GBP"):
         return 20, 55
-
-    # Standard majors/minors.
     if s in {"EURUSD", "USDCHF", "USDCAD", "AUDUSD", "NZDUSD", "EURGBP", "AUDCAD", "AUDNZD"}:
         return 15, 40
-
     return 20, 50
 
 
 def percentage_risk_thresholds(symbol: str) -> tuple[float, float]:
-    """Return LOW/MEDIUM limits as decimals, e.g. 0.003 = 0.30%."""
+    """Return tight/medium limits as decimals, e.g. 0.003 = 0.30%."""
     s = (symbol or "").upper().replace("/", "")
     fam = symbol_family(s)
 
-    # Crypto pair-specific thresholds.
     if s.startswith("BTC"):
         return 0.0035, 0.0090
     if s.startswith("ETH"):
@@ -131,7 +123,6 @@ def percentage_risk_thresholds(symbol: str) -> tuple[float, float]:
     if s.startswith("XRP"):
         return 0.0100, 0.0250
 
-    # Indices pair-specific thresholds.
     if s in {"NAS100", "US100"}:
         return 0.0025, 0.0065
     if s == "US30":
@@ -141,7 +132,6 @@ def percentage_risk_thresholds(symbol: str) -> tuple[float, float]:
     if s in {"GER40", "DAX", "DAX40"}:
         return 0.0025, 0.0060
 
-    # Metals except gold are better judged by percentage.
     if s.startswith("XAG"):
         return 0.0040, 0.0100
 
@@ -155,6 +145,11 @@ def percentage_risk_thresholds(symbol: str) -> tuple[float, float]:
 
 
 def dynamic_risk(symbol: str, entry: float, sl: float) -> str:
+    """
+    Inverted practical signal risk:
+    tighter stop = HIGH risk because normal noise can hit SL easier;
+    wider stop = LOW risk because the setup has more breathing room.
+    """
     symbol = (symbol or "").upper().replace("/", "")
     entry = float(entry)
     sl = float(sl)
@@ -162,44 +157,39 @@ def dynamic_risk(symbol: str, entry: float, sl: float) -> str:
     pct = distance / entry if entry else 999
     fam = symbol_family(symbol)
 
-    # Gold uses direct dollar distance because that is how XAU traders think.
     if fam == "GOLD":
         if distance <= 6:
-            return "LOW"
+            return "HIGH"
         if distance <= 15:
             return "MEDIUM"
-        return "HIGH"
+        return "LOW"
 
-    # Forex uses pips, not raw price percentage.
     if fam == "FOREX":
         pip_size = forex_pip_size(symbol)
         pips = distance / pip_size
-        low_pips, medium_pips = forex_risk_thresholds(symbol)
-        if pips <= low_pips:
-            return "LOW"
+        tight_pips, medium_pips = forex_risk_thresholds(symbol)
+        if pips <= tight_pips:
+            return "HIGH"
         if pips <= medium_pips:
             return "MEDIUM"
-        return "HIGH"
-
-    low_pct, medium_pct = percentage_risk_thresholds(symbol)
-    if pct <= low_pct:
         return "LOW"
+
+    tight_pct, medium_pct = percentage_risk_thresholds(symbol)
+    if pct <= tight_pct:
+        return "HIGH"
     if pct <= medium_pct:
         return "MEDIUM"
-    return "HIGH"
+    return "LOW"
 
 
 def risk_from_text(text: str, symbol: str, entry: float, sl: float) -> str:
     t = (text or "").upper()
-
-    # Provider explicit warnings override the calculation.
     if "RISKY" in t or "HIGHER RISK" in t or "HIGH RISK" in t or "VERY HIGH" in t:
         return "HIGH"
     if "MEDIUM RISK" in t:
         return "MEDIUM"
     if "LOW RISK" in t:
         return "LOW"
-
     return dynamic_risk(symbol, entry, sl)
 
 
@@ -449,7 +439,7 @@ def claude_extract(text: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def extract_and_format(text: str, source_name: str, message_id=None) -> Optional[Dict[str, Any]]:
+def extract_and_format(text: str, source_name: str = "ExposedFX", message_id=None) -> Optional[Dict[str, Any]]:
     sig = regex_extract(text) or claude_extract(text)
     if not sig:
         return None
