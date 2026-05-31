@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import base64
 import logging
 import os
@@ -24,6 +24,7 @@ DEST_CHAT = int(os.environ.get("CLEAN_FORWARD_DEST_CHAT", "-5144279180"))
 # 1 = send as clean copied message, 0 = Telegram forward
 # I recommend 1 so the new group only sees clean signals, no forwarded/source mess.
 COPY_MODE = os.environ.get("CLEAN_FORWARD_COPY_MODE", "1").strip() == "1"
+STRICT_ONLY_AI_FORMAT = os.environ.get("STRICT_ONLY_AI_FORMAT", "1").strip() == "1"
 
 DATA_DIR = Path(os.environ.get("DATA_DIR") or "./data")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -89,26 +90,59 @@ def text_of(message) -> str:
 
 
 def is_my_formatted_signal(text: str) -> bool:
+    """
+    FINAL GROUP RULE:
+    Only forward completed AI formatted signal templates.
+    Nothing else is allowed.
+    """
     t = (text or "").strip()
     low = t.lower()
 
     if not t:
         return False
 
-    # Block source lines and non-signal messages.
-    if "source: exposedfx" in low:
+    blocked = [
+        "source:",
+        "exposedfx |",
+        "forwarded from",
+        "partial",
+        "take further",
+        "take a partial",
+        "running trade",
+        "remainder should run",
+        "set stop loss",
+        "move stop loss",
+        "move sl",
+        "click close",
+        "edit the lot size",
+        "pips",
+        "ended with",
+        "weekly recap",
+        "daily recap",
+        "results",
+        "profit today",
+    ]
+
+    if any(x in low for x in blocked):
         return False
 
     if not HEADER_RE.search(t):
         return False
 
     required = [
-        r"•\s*(?:buy|sell)\s+point\s*:",
-        r"•\s*layer\s+point\s*:",
-        r"•\s*stop\s+loss\s*:",
-        r"tp1\s*-",
-        r"risk\s*:",
+        r"•\s*(?:buy|sell)\s+point\s*:\s*[-+]?\d",
+        r"•\s*layer\s+point\s*:\s*[-+]?\d",
+        r"•\s*stop\s+loss\s*:\s*[-+]?\d",
+        r"tp1\s*-\s*[-+]?\d",
+        r"tp2\s*-\s*[-+]?\d",
+        r"tp3\s*-\s*[-+]?\d",
+        r"tp8\s*-\s*[-+]?\d",
+        r"tp9\s*-\s*open",
+        r"risk\s*:\s*(?:low|medium|high)",
         r"tips\s*:",
+        r"breakeven\s+after\s+tp1\s+hit",
+        r"use\s+correct\s+risk\s+management",
+        r"take\s+spread\s+into\s+consideration",
         r"this\s+is\s+not\s+financial\s+advice",
     ]
 

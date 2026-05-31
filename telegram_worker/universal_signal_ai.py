@@ -24,6 +24,80 @@ def clean(text: str) -> str:
     return (text or "").replace("\u200b", " ").replace("\xa0", " ").strip()
 
 
+
+def is_trade_management_update(text: str) -> bool:
+    raw = clean(text)
+    t = raw.upper()
+    low = raw.lower()
+
+    management_words = [
+        "partial",
+        "take further",
+        "take a partial",
+        "running trade",
+        "remainder should run",
+        "set stop loss",
+        "move stop loss",
+        "move sl",
+        "sl to",
+        "stop loss to",
+        "click close",
+        "edit the lot size",
+        "close half",
+        "close 50",
+        "secure profits",
+        "book profits",
+        "being cautious",
+        "just looking after us",
+    ]
+
+    recap_words = [
+        "pips",
+        "ended with",
+        "we ended",
+        "weekly recap",
+        "daily recap",
+        "results",
+        "profit today",
+        "pips secured",
+        "pips banked",
+    ]
+
+    has_management = any(x in low for x in management_words)
+    has_recap = any(x in low for x in recap_words)
+
+    has_direction = bool(re.search(r"\b(BUY|BUYS|BUYING|SELL|SELLS|SELLING|LONG|LONGS|SHORT|SHORTS)\b", t))
+    has_entry = bool(re.search(r"\b(ENTRY|ENTRIES|ENTER|ENTERING|BUY\s+LIMIT|SELL\s+LIMIT|BUY\s+ZONE|SELL\s+ZONE|BUY\s+NOW|SELL\s+NOW)\b", t))
+    has_sl = bool(re.search(r"\b(SL|S/L|STOP\s*LOSS|STOPLOSS)\b\s*(?:TO)?\s*[:\-]?\s*\d", t))
+
+    # Block updates/recaps unless they clearly contain a fresh setup.
+    if (has_management or has_recap) and not (has_direction and has_entry and has_sl):
+        return True
+
+    return False
+
+
+def has_strict_new_signal_requirements(text: str) -> bool:
+    raw = clean(text)
+    t = raw.upper()
+
+    if is_trade_management_update(raw):
+        return False
+
+    has_direction = bool(re.search(r"\b(BUY|BUYS|BUYING|SELL|SELLS|SELLING|LONG|LONGS|SHORT|SHORTS)\b", t))
+
+    has_entry = bool(
+        re.search(r"\b(ENTRY|ENTRIES|ENTER|ENTERING)\b[\s\S]{0,80}\d", t)
+        or re.search(r"\b(BUY|BUYS|SELL|SELLS)\s+(?:LIMIT|ZONE|NOW)?\b[\s\S]{0,80}\d", t)
+        or re.search(r"\b(LONG|LONGS|SHORT|SHORTS)\b[\s\S]{0,80}\d", t)
+    )
+
+    has_sl = bool(re.search(r"\b(SL|S/L|STOP\s*LOSS|STOPLOSS)\b\s*(?:TO)?\s*[:\-]?\s*\d", t))
+
+    return has_direction and has_entry and has_sl
+
+
+
 def normalize_symbol(symbol: str, text: str = "") -> str:
     raw = (text or "").upper()
     t = raw.replace("/", "").replace("-", "").replace(" ", "")
@@ -82,6 +156,8 @@ def symbol_family(symbol: str) -> str:
 
 
 def looks_like_signal(text: str) -> bool:
+    if not has_strict_new_signal_requirements(text):
+        return False
     t = clean(text).upper()
     has_price = bool(re.search(rf"\b{PRICE_RE}\b", t))
     has_action = bool(re.search(r"\b(BUY|BUYS|BUYING|SELL|SELLS|SELLING|LONG|LONGS|SHORT|SHORTS|ENTERING|ENTRY|LIMIT)\b", t))
@@ -309,6 +385,8 @@ def extract_tps(text: str) -> tuple[list[float], bool]:
 
 def regex_extract(text: str) -> Optional[Dict[str, Any]]:
     raw = clean(text)
+    if not has_strict_new_signal_requirements(raw):
+        return None
     if not looks_like_signal(raw):
         return None
 
@@ -359,6 +437,8 @@ def parse_jsonish(value: str) -> Optional[Dict[str, Any]]:
 
 
 def claude_extract(text: str) -> Optional[Dict[str, Any]]:
+    if not has_strict_new_signal_requirements(text):
+        return None
     if not (USE_CLAUDE and ANTHROPIC_API_KEY):
         return None
 
@@ -440,6 +520,8 @@ def claude_extract(text: str) -> Optional[Dict[str, Any]]:
 
 
 def extract_and_format(text: str, source_name: str = "ExposedFX", message_id=None) -> Optional[Dict[str, Any]]:
+    if not has_strict_new_signal_requirements(text):
+        return None
     sig = regex_extract(text) or claude_extract(text)
     if not sig:
         return None
