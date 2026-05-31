@@ -91,6 +91,31 @@ TOPIC_NAMES = {
 }
 
 
+def source_channel_id():
+    text = str(SIGNAL_SOURCE_CHAT)
+    if text.startswith("-100"):
+        return int(text[4:])
+    return abs(SIGNAL_SOURCE_CHAT)
+
+
+def event_is_from_source(event):
+    cid = getattr(event, "chat_id", None)
+    if cid == SIGNAL_SOURCE_CHAT:
+        return True
+
+    channel_id = source_channel_id()
+    msg = getattr(event, "message", None)
+    peer = getattr(msg, "peer_id", None)
+    if getattr(peer, "channel_id", None) == channel_id:
+        return True
+    if getattr(peer, "chat_id", None) == abs(SIGNAL_SOURCE_CHAT):
+        return True
+
+    if cid == channel_id:
+        return True
+    return False
+
+
 def message_text(message):
     return message.message or message.raw_text or message.text or ""
 
@@ -224,9 +249,12 @@ async def send_result(message, result, key):
     return True
 
 
-@client.on(events.NewMessage(chats=SIGNAL_SOURCE_CHAT))
+@client.on(events.NewMessage())
 async def on_signal_hub_message(event):
     try:
+        if not event_is_from_source(event):
+            return
+
         message = event.message
         if should_skip(message):
             return
@@ -234,6 +262,7 @@ async def on_signal_hub_message(event):
         text = message_text(message).strip()
         key = buffer_key(message)
         source_name = source_name_for(message)
+        log.info(f"[signal hub seen] msg={message.id} topic={topic_id_of(message)} text={text[:80]}")
 
         if looks_like_signal_candidate(text):
             await forward_original(message, text)
@@ -274,7 +303,7 @@ async def main():
 
     me = await client.get_me()
     log.info(f"Logged in as {me.first_name} | id={me.id}")
-    log.info(f"Signal hub source: {SIGNAL_SOURCE_CHAT}")
+    log.info(f"Signal hub source: {SIGNAL_SOURCE_CHAT} | source channel id: {source_channel_id()}")
     log.info(f"Signal hub destination: {SIGNAL_DEST_CHAT}")
     log.info(f"Allowed topics: {sorted(ALLOWED_SOURCE_TOPICS)}")
     log.info(f"Forward signal candidates: {FORWARD_SIGNAL_CANDIDATES}")
