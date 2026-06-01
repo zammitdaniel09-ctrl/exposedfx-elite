@@ -1,10 +1,12 @@
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import re
 import time
 from collections import defaultdict, deque
+from pathlib import Path
 
 from telethon import events
 
@@ -44,6 +46,11 @@ def topic_set_from_env(name, default):
 
 SIGNAL_SOURCE_CHAT = chat_id_from_env("SIGNAL_SOURCE_CHAT", "-1003918958200")
 SIGNAL_DEST_CHAT = chat_id_from_env("SIGNAL_DEST_CHAT", "-5252460120")
+
+DATA_DIR = Path(os.environ.get("DATA_DIR") or "./data")
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+SIGNAL_PACKET_MAP_FILE = DATA_DIR / "signal_packet_map.json"
+DELETE_OLD_SIGNAL_PACKET_ON_EDIT = os.environ.get("DELETE_OLD_SIGNAL_PACKET_ON_EDIT", "1").strip() == "1"
 SEND_SOURCE_LINE = os.environ.get("SEND_SOURCE_LINE", "1").strip() == "1"
 DROP_LINK_ONLY = os.environ.get("DROP_LINK_ONLY", "1").strip() == "1"
 LINK_ONLY_RE = re.compile(r"^(?:https?://|t\.me/|www\.)\S+$", re.IGNORECASE)
@@ -58,6 +65,7 @@ ALLOWED_SOURCE_TOPICS = topic_set_from_env("ALLOWED_SOURCE_TOPICS", DEFAULT_ALLO
 buffers = defaultdict(lambda: deque(maxlen=BUFFER_MAX_MESSAGES))
 sent_signatures = deque(maxlen=300)
 sent_signature_set = set()
+signal_packet_map = load_packet_map()
 
 TOPIC_NAMES = {
     2: "Triad FX",
@@ -168,6 +176,68 @@ def buffer_key(message):
     return str(topic_id or "main")
 
 
+
+def load_packet_map():
+    if not SIGNAL_PACKET_MAP_FILE.exists():
+        return {}
+    try:
+        return json.loads(SIGNAL_PACKET_MAP_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def save_packet_map():
+    try:
+        tmp = SIGNAL_PACKET_MAP_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(signal_packet_map), encoding="utf-8")
+        tmp.replace(SIGNAL_PACKET_MAP_FILE)
+    except Exception as exc:
+        log.warning(f"[signal packet map save failed] {exc}")
+
+
+def signal_packet_key(message, key):
+    return f"{SIGNAL_SOURCE_CHAT}:{key}:{getattr(message, 'id', None)}"
+
+
+async def delete_existing_signal_packet(message, key):
+    if not DELETE_OLD_SIGNAL_PACKET_ON_EDIT:
+        return False
+
+    pkey = signal_packet_key(message, key)
+    old_ids = signal_packet_map.get(pkey) or []
+
+    if not old_ids:
+        return False
+
+    try:
+        ids = [int(x) for x in old_ids if x]
+        if ids:
+            await client.delete_messages(SIGNAL_DEST_CHAT, ids)
+            log.info(f"[signal packet cleanup] deleted old packet source_msg={message.id} dest_ids={ids}")
+        signal_packet_map.pop(pkey, None)
+        save_packet_map()
+        return True
+    except Exception as exc:
+        log.warning(f"[signal packet cleanup failed] source_msg={message.id} ids={old_ids}: {exc}")
+        return False
+
+
+def remember_signal_packet(message, key, sent_messages):
+    pkey = signal_packet_key(message, key)
+    ids = []
+
+    for msg in sent_messages:
+        mid = getattr(msg, "id", None)
+        if mid:
+            ids.append(int(mid))
+
+    if ids:
+        signal_packet_map[pkey] = ids
+        save_packet_map()
+        log.info(f"[signal packet mapped] source_msg={message.id} -> dest_ids={ids}")
+
+
+
 def trim_buffer(key):
     now = time.time()
     dq = buffers[key]
@@ -247,9 +317,17 @@ async def send_full_signal(message, result, key, original_text, forward_raw=True
         return False
 
     try:
+        # If this source message was edited and already produced a packet,
+        # delete the old original + old AI format + old source first.
+        await delete_existing_signal_packet(message, key)
+
         original_sent = None
+        sent_messages = []
+
         if forward_raw:
             original_sent = await forward_original(message, original_text)
+            if original_sent:
+                sent_messages.append(original_sent)
 
         reply_to_id = getattr(original_sent, "id", None)
 
@@ -260,15 +338,20 @@ async def send_full_signal(message, result, key, original_text, forward_raw=True
             link_preview=False,
             reply_to=reply_to_id,
         )
+        sent_messages.append(ai_sent)
 
         if SEND_SOURCE_LINE:
-            await client.send_message(
+            source_sent = await client.send_message(
                 SIGNAL_DEST_CHAT,
                 result["source"],
                 parse_mode="html",
                 link_preview=False,
                 reply_to=reply_to_id or getattr(ai_sent, "id", None),
             )
+            sent_messages.append(source_sent)
+
+        remember_signal_packet(message, key, sent_messages)
+
     except Exception as exc:
         log.exception(f"[signal hub packet send failed] {exc}")
         return False
@@ -351,6 +434,7 @@ async def main():
     log.info(f"Signal hub destination: {SIGNAL_DEST_CHAT}")
     log.info(f"Allowed topics: {sorted(ALLOWED_SOURCE_TOPICS)}")
     log.info(f"Forward original only after confirmed signal: {FORWARD_SIGNAL_CANDIDATES}")
+    log.info(f"DELETE_OLD_SIGNAL_PACKET_ON_EDIT={DELETE_OLD_SIGNAL_PACKET_ON_EDIT}")
     log.info("AI/source replies to the forwarded original: True")
     log.info(f"Universal AI extractor active for any pair")
     log.info(f"Partial signal buffer: {PARTIAL_BUFFER_ENABLED} | window={BUFFER_WINDOW_SECONDS}s | max={BUFFER_MAX_MESSAGES}")

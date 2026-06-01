@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import json
 import logging
 import os
 import re
@@ -31,6 +32,62 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 SESSION_BASE = DATA_DIR / "clean_forwarder_session"
 SESSION_FILE = DATA_DIR / "clean_forwarder_session.session"
+CLEAN_MESSAGE_MAP_FILE = DATA_DIR / "clean_forwarder_message_map.json"
+
+
+
+def load_message_map():
+    if not CLEAN_MESSAGE_MAP_FILE.exists():
+        return {}
+    try:
+        return json.loads(CLEAN_MESSAGE_MAP_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def save_message_map():
+    try:
+        tmp = CLEAN_MESSAGE_MAP_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(clean_message_map), encoding="utf-8")
+        tmp.replace(CLEAN_MESSAGE_MAP_FILE)
+    except Exception as exc:
+        log.warning(f"[map save failed] {exc}")
+
+
+def map_key(source_msg_id):
+    return str(int(source_msg_id))
+
+
+def remember_clean_copy(source_msg, dest_msg):
+    if not source_msg or not dest_msg:
+        return
+
+    src_id = getattr(source_msg, "id", None)
+    dst_id = getattr(dest_msg, "id", None)
+
+    if src_id and dst_id:
+        clean_message_map[map_key(src_id)] = int(dst_id)
+        save_message_map()
+        log.info(f"[mapped clean copy] source_msg={src_id} -> dest_msg={dst_id}")
+
+
+async def delete_clean_copy_by_source_id(source_msg_id):
+    key = map_key(source_msg_id)
+    dst_id = clean_message_map.get(key)
+
+    if not dst_id:
+        return False
+
+    try:
+        await client.delete_messages(DEST_CHAT, int(dst_id))
+        clean_message_map.pop(key, None)
+        save_message_map()
+        log.info(f"[deleted clean copy] source_msg={source_msg_id} dest_msg={dst_id}")
+        return True
+    except Exception as exc:
+        log.warning(f"[delete clean copy failed] source_msg={source_msg_id} dest_msg={dst_id}: {exc}")
+        return False
+
 
 
 def clean_b64(value: str) -> str:
@@ -76,6 +133,7 @@ def write_session_file():
 
 write_session_file()
 client = TelegramClient(str(SESSION_BASE), API_ID, API_HASH)
+clean_message_map = load_message_map()
 
 
 HEADER_RE = re.compile(
@@ -163,9 +221,11 @@ async def on_message(event):
         return
 
     try:
+        sent = None
+
         if COPY_MODE:
             if getattr(message, "media", None):
-                await client.send_file(
+                sent = await client.send_file(
                     DEST_CHAT,
                     message.media,
                     caption=text,
@@ -174,7 +234,7 @@ async def on_message(event):
                 )
                 log.info(f"[COPIED MEDIA SIGNAL] msg={message.id} -> {DEST_CHAT}")
             else:
-                await client.send_message(
+                sent = await client.send_message(
                     DEST_CHAT,
                     text,
                     formatting_entities=getattr(message, "entities", None),
@@ -183,8 +243,10 @@ async def on_message(event):
                 )
                 log.info(f"[COPIED SIGNAL] msg={message.id} -> {DEST_CHAT}")
         else:
-            await client.forward_messages(DEST_CHAT, message)
+            sent = await client.forward_messages(DEST_CHAT, message)
             log.info(f"[FORWARDED SIGNAL] msg={message.id} -> {DEST_CHAT}")
+
+        remember_clean_copy(message, sent)
 
     except FloodWaitError as exc:
         wait = min(int(exc.seconds) + 1, 60)
@@ -193,6 +255,12 @@ async def on_message(event):
 
     except Exception as exc:
         log.exception(f"[FAILED] msg={message.id}: {exc}")
+
+
+@client.on(events.MessageDeleted(chats=SOURCE_CHAT))
+async def on_deleted(event):
+    for source_msg_id in getattr(event, "deleted_ids", []) or []:
+        await delete_clean_copy_by_source_id(source_msg_id)
 
 
 async def main():
@@ -205,6 +273,7 @@ async def main():
     log.info(f"Logged in as {me.first_name} | id={me.id}")
     log.info(f"Source={SOURCE_CHAT} Destination={DEST_CHAT} CopyMode={COPY_MODE}")
     log.info("Clean formatted signal forwarder running...")
+    log.info("Delete sync from incoming group to final group: True")
     await client.run_until_disconnected()
 
 
