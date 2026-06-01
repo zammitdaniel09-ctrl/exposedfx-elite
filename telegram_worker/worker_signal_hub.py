@@ -199,6 +199,12 @@ def signal_packet_key(message, key):
 
 
 async def delete_existing_signal_packet(message, key):
+    global signal_packet_map
+
+    if "signal_packet_map" not in globals():
+        signal_packet_map = load_packet_map()
+        log.warning("[signal packet map recovery] initialized missing signal_packet_map")
+
     if not DELETE_OLD_SIGNAL_PACKET_ON_EDIT:
         return False
 
@@ -222,6 +228,12 @@ async def delete_existing_signal_packet(message, key):
 
 
 def remember_signal_packet(message, key, sent_messages):
+    global signal_packet_map
+
+    if "signal_packet_map" not in globals():
+        signal_packet_map = load_packet_map()
+        log.warning("[signal packet map recovery] initialized missing signal_packet_map in remember")
+
     pkey = signal_packet_key(message, key)
     ids = []
 
