@@ -41,6 +41,14 @@ MESSAGE_MAP_FILE = DATA_DIR / "message_map.json"
 DEDUP_FILE = DATA_DIR / "dedupe_map.json"
 DEDUP_WINDOW_SECONDS = int(os.environ.get("DEDUP_WINDOW_SECONDS", "900"))
 
+BLOCKED_DEST_CHAT = int(os.environ.get("BLOCKED_DEST_CHAT", "-1003918958200"))
+BLOCKED_DEST_TOPICS_RAW = os.environ.get("BLOCKED_DEST_TOPICS", "1").strip()
+BLOCKED_DEST_TOPICS = {
+    int(x)
+    for x in re.split(r"[,\s]+", BLOCKED_DEST_TOPICS_RAW)
+    if x.strip()
+}
+
 SOURCE_CHATS = sorted(set(r["source_chat"] for r in ROUTES))
 POSTED_SIGNAL_KEYS = set()
 stats = WeeklyStats(DATA_DIR)
@@ -307,11 +315,31 @@ def same_source_and_destination(route, topic_id):
     )
 
 
+
+def is_blocked_destination(route):
+    try:
+        return (
+            int(route.get("dest_chat")) == BLOCKED_DEST_CHAT
+            and int(route.get("dest_topic")) in BLOCKED_DEST_TOPICS
+        )
+    except Exception:
+        return False
+
+
 def routes_for(chat_id, topic_id, message=None):
     found = []
     for route in ROUTES:
         if route["source_chat"] != chat_id:
             continue
+
+        if is_blocked_destination(route):
+            log.warning(
+                f"[blocked destination] route={route.get('name')} "
+                f"source={route.get('source_chat')}_{route.get('source_topic')} "
+                f"blocked_dest={route.get('dest_chat')}_{route.get('dest_topic')}"
+            )
+            continue
+
         if route["source_topic"] is not None and route["source_topic"] != topic_id:
             continue
         if same_source_and_destination(route, topic_id):
@@ -325,7 +353,7 @@ def routes_for(chat_id, topic_id, message=None):
     # Media/reply fallback: if this source group has one destination topic,
     # forward there even when Telegram gives missing/wrong topic id.
     if message is not None and is_real_media(message):
-        fallback = unique_routes_for_source_chat(chat_id)
+        fallback = [r for r in unique_routes_for_source_chat(chat_id) if not is_blocked_destination(r)]
         if fallback:
             log.warning(
                 f"[media route fallback] source={chat_id}_{topic_id} "
@@ -627,6 +655,7 @@ async def main():
     log.info(f"Loaded {len(ROUTES)} routes")
     log.info(f"FORWARD_EDITED_MESSAGES={FORWARD_EDITED_MESSAGES}")
     log.info(f"DEDUP_WINDOW_SECONDS={DEDUP_WINDOW_SECONDS}")
+    log.info(f"BLOCKED_DEST_CHAT={BLOCKED_DEST_CHAT} BLOCKED_DEST_TOPICS={sorted(BLOCKED_DEST_TOPICS)}")
     log.info(f"PROCESS_GROUPED_MESSAGES_IN_NEW_HANDLER={PROCESS_GROUPED_MESSAGES_IN_NEW_HANDLER}")
     log.info(f"ENABLE_ALBUM_HANDLER={ENABLE_ALBUM_HANDLER}")
     log.info("Imperium fixed Telegram worker running...")
