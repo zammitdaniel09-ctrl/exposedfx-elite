@@ -224,16 +224,20 @@ def signature_for(result, key):
 
 
 async def forward_original(message, text):
+    """
+    Forward/copy the original and return the sent message,
+    so the AI format and source can reply to it.
+    """
     if not FORWARD_SIGNAL_CANDIDATES:
-        return False
+        return None
     try:
-        await client.forward_messages(SIGNAL_DEST_CHAT, message)
+        sent = await client.forward_messages(SIGNAL_DEST_CHAT, message)
         log.info(f"[signal hub original forwarded] msg={message.id} topic={topic_id_of(message)}")
-        return True
+        return sent
     except Exception as exc:
         log.warning(f"Forward original failed, sending text copy instead: {exc}")
-        await client.send_message(SIGNAL_DEST_CHAT, text, parse_mode=None, link_preview=False)
-        return True
+        sent = await client.send_message(SIGNAL_DEST_CHAT, text, parse_mode=None, link_preview=False)
+        return sent
 
 
 async def send_full_signal(message, result, key, original_text, forward_raw=True):
@@ -243,11 +247,28 @@ async def send_full_signal(message, result, key, original_text, forward_raw=True
         return False
 
     try:
+        original_sent = None
         if forward_raw:
-            await forward_original(message, original_text)
-        await client.send_message(SIGNAL_DEST_CHAT, result["message"], parse_mode="html", link_preview=False)
+            original_sent = await forward_original(message, original_text)
+
+        reply_to_id = getattr(original_sent, "id", None)
+
+        ai_sent = await client.send_message(
+            SIGNAL_DEST_CHAT,
+            result["message"],
+            parse_mode="html",
+            link_preview=False,
+            reply_to=reply_to_id,
+        )
+
         if SEND_SOURCE_LINE:
-            await client.send_message(SIGNAL_DEST_CHAT, result["source"], parse_mode="html", link_preview=False)
+            await client.send_message(
+                SIGNAL_DEST_CHAT,
+                result["source"],
+                parse_mode="html",
+                link_preview=False,
+                reply_to=reply_to_id or getattr(ai_sent, "id", None),
+            )
     except Exception as exc:
         log.exception(f"[signal hub packet send failed] {exc}")
         return False
@@ -330,6 +351,7 @@ async def main():
     log.info(f"Signal hub destination: {SIGNAL_DEST_CHAT}")
     log.info(f"Allowed topics: {sorted(ALLOWED_SOURCE_TOPICS)}")
     log.info(f"Forward original only after confirmed signal: {FORWARD_SIGNAL_CANDIDATES}")
+    log.info("AI/source replies to the forwarded original: True")
     log.info(f"Universal AI extractor active for any pair")
     log.info(f"Partial signal buffer: {PARTIAL_BUFFER_ENABLED} | window={BUFFER_WINDOW_SECONDS}s | max={BUFFER_MAX_MESSAGES}")
     await admin_startup(client)
