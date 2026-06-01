@@ -65,7 +65,6 @@ ALLOWED_SOURCE_TOPICS = topic_set_from_env("ALLOWED_SOURCE_TOPICS", DEFAULT_ALLO
 buffers = defaultdict(lambda: deque(maxlen=BUFFER_MAX_MESSAGES))
 sent_signatures = deque(maxlen=300)
 sent_signature_set = set()
-signal_packet_map = load_packet_map()
 
 TOPIC_NAMES = {
     2: "Triad FX",
