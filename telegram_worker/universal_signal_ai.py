@@ -258,6 +258,97 @@ def dynamic_risk(symbol: str, entry: float, sl: float) -> str:
     return "LOW"
 
 
+
+def xau_pip_value() -> float:
+    # Gold rule: 10 pips = $1, so 1 pip = $0.10
+    return 0.1
+
+
+def pip_value_for_symbol(symbol: str) -> float:
+    fam = symbol_family(symbol)
+    s = (symbol or "").upper().replace("/", "")
+
+    if fam == "GOLD":
+        return xau_pip_value()
+    if fam == "FOREX":
+        return forex_pip_size(s)
+    if fam == "INDEX":
+        return 1.0
+    if fam == "CRYPTO":
+        return 1.0
+    if fam == "METAL":
+        return 0.01
+    return 1.0
+
+
+def expand_shorthand_price(first: float, second_text: str) -> float:
+    """
+    Expands shorthand ranges:
+    4498-96 -> 4498-4496
+    4492-89 -> 4492-4489
+    4502-00 -> 4502-4500
+    """
+    raw = str(second_text).strip()
+
+    if "." in raw:
+        return float(raw)
+
+    try:
+        second = float(raw)
+    except Exception:
+        return float(first)
+
+    if abs(first) >= 1000 and 0 <= second < 100:
+        first_int = str(int(abs(first)))
+        digits = raw.zfill(len(raw))
+        prefix = first_int[:-len(digits)]
+        candidate = float(prefix + digits)
+
+        # Handles rollover cases like 4502-99 -> 4499
+        if candidate > first and (candidate - first) > 50:
+            candidate -= 100
+
+        return candidate
+
+    return second
+
+
+def convert_distance_sl_if_needed(symbol: str, direction: str, entry_mid: float, sl_value: float, text: str) -> float:
+    """
+    Converts distance-style SL into chart price.
+    Example: Gold buy 4496 / SL 40pip -> SL 4492
+    """
+    raw = clean(text)
+    up = raw.upper()
+
+    has_sl_distance_word = bool(
+        re.search(r"\b(?:SL|S/L|STOP\s*LOSS|STOPLOSS|STOP)\b\s*[:\-]?\s*\d+(?:\.\d+)?\s*(?:PIP|PIPS|POINT|POINTS)\b", up)
+        or re.search(r"\b\d+(?:\.\d+)?\s*(?:PIP|PIPS|POINT|POINTS)\b", up)
+    )
+
+    if not has_sl_distance_word:
+        return float(sl_value)
+
+    entry_mid = float(entry_mid)
+    sl_value = float(sl_value)
+
+    # If already a real chart price close to entry, leave it.
+    if entry_mid and abs(sl_value - entry_mid) / entry_mid < 0.10:
+        return sl_value
+
+    distance = sl_value * pip_value_for_symbol(symbol)
+
+    if direction == "BUY":
+        return entry_mid - distance
+    return entry_mid + distance
+
+
+def invalid_tp_for_direction(direction: str, entry: float, tp: float) -> bool:
+    if direction == "BUY":
+        return tp <= entry
+    return tp >= entry
+
+
 def risk_from_text(text: str, symbol: str, entry: float, sl: float) -> str:
     t = (text or "").upper()
     if "RISKY" in t or "HIGHER RISK" in t or "HIGH RISK" in t or "VERY HIGH" in t:
@@ -334,20 +425,34 @@ def direction_from_text(text: str) -> Optional[str]:
 
 
 def extract_entry(text: str) -> Optional[tuple[float, float]]:
-    up = text.upper().replace("–", "-").replace("—", "-")
+    raw = clean(text)
+    up = raw.upper().replace("–", "-").replace("—", "-")
+
     patterns = [
+        # Entry: 4498-96 / Entry 4498 to 4496
         rf"\b(?:ENTRY|ENTRIES|ENTER|ENTERING)\b(?:\s+(?:AROUND|AT|NOW))?\s*[:\-]?\s*({PRICE_RE})\s*(?:-|TO|/)\s*({PRICE_RE})",
         rf"\b(?:ENTRY|ENTRIES|ENTER|ENTERING)\b(?:\s+(?:AROUND|AT|NOW))?\s*[:\-]?\s*({PRICE_RE})",
-        rf"\b(?:BUY|BUYS|BUYING|SELL|SELLS|SELLING|LONG|LONGS|SHORT|SHORTS)\b(?:\s+(?:NOW|LIMIT|STOP|ZONE|AT|AROUND))*\D{{0,100}}({PRICE_RE})\s*(?:-|TO|/)\s*({PRICE_RE})",
-        rf"\b(?:BUY|BUYS|BUYING|SELL|SELLS|SELLING|LONG|LONGS|SHORT|SHORTS)\b(?:\s+(?:NOW|LIMIT|STOP|ZONE|AT|AROUND))*\D{{0,100}}({PRICE_RE})",
+
+        # Buy/Sell same-line entries only. Do NOT cross into SL/TP lines.
+        rf"\b(?:BUY|BUYS|BUYING|SELL|SELLS|SELLING|LONG|LONGS|SHORT|SHORTS)\b(?:\s+(?:NOW|LIMIT|STOP|ZONE|AT|AROUND))*[^\n]{0,80}?({PRICE_RE})\s*(?:-|TO|/)\s*({PRICE_RE})",
+        rf"\b(?:BUY|BUYS|BUYING|SELL|SELLS|SELLING|LONG|LONGS|SHORT|SHORTS)\b(?:\s+(?:NOW|LIMIT|STOP|ZONE|AT|AROUND))*[^\n]{0,80}?({PRICE_RE})",
     ]
+
     for pat in patterns:
         m = re.search(pat, up)
-        if m:
-            a = float(m.group(1))
-            b = float(m.group(2)) if len(m.groups()) > 1 and m.group(2) else a
-            return min(a, b), max(a, b)
+        if not m:
+            continue
+
+        a = float(m.group(1))
+        if len(m.groups()) > 1 and m.group(2):
+            b = expand_shorthand_price(a, m.group(2))
+        else:
+            b = a
+
+        return min(a, b), max(a, b)
+
     return None
+
 
 
 def extract_sl(text: str) -> Optional[float]:
@@ -408,6 +513,17 @@ def regex_extract(text: str) -> Optional[Dict[str, Any]]:
             return None
 
     mid = (entry[0] + entry[1]) / 2
+    sl = convert_distance_sl_if_needed(symbol, direction, mid, sl, raw)
+
+    # Remove impossible TPs that are on the wrong side.
+    tps = [tp for tp in tps if not invalid_tp_for_direction(direction, mid, float(tp))]
+
+    if not tps and not tp_open:
+        if AUTO_TP_IF_MISSING:
+            tp_open = True
+        else:
+            return None
+
     return {
         "is_signal": True,
         "symbol": symbol,
@@ -445,7 +561,7 @@ def claude_extract(text: str) -> Optional[Dict[str, Any]]:
     system = (
         "Extract an actionable trading signal from messy Telegram text. Return JSON only. "
         "Accept any market: forex, metals, crypto, indices. "
-        "A complete signal needs direction, entry, and stop loss. If no TP is provided, treat it as TP open so targets can be estimated. "
+        "A complete signal needs direction, entry, and stop loss. If no TP is provided, treat it as TP open so targets can be estimated. If stop loss is written as pip distance, keep the numeric pip distance and the system will convert it. For XAUUSD/GOLD, 10 pips equals 1 dollar, so 40 pips equals 4 dollars. Expand shorthand ranges such as 4498-96 as 4498 to 4496, not 4498 to 96. Do not use SL or TP prices as entry when entry is missing. "
         "Use latest/current stop loss if several are shown. "
         "For TP open with no numbers, return tps=[] and tp_open=true. "
         "Do not decide risk unless the text explicitly says low risk, medium risk, high risk, higher risk, risky, or very high. Otherwise leave risk empty so the system calculates risk dynamically by pair. "
@@ -498,6 +614,8 @@ def claude_extract(text: str) -> Optional[Dict[str, Any]]:
             else:
                 return None
         mid = (entry_low + entry_high) / 2
+        sl = convert_distance_sl_if_needed(symbol, direction, mid, sl, text)
+        tps = [tp for tp in tps if not invalid_tp_for_direction(direction, mid, float(tp))]
         explicit_risk = str(obj.get("risk", "")).upper()
         if explicit_risk in ("LOW", "MEDIUM", "HIGH") and any(x in clean(text).upper() for x in ("LOW RISK", "MEDIUM RISK", "HIGH RISK", "HIGHER RISK", "VERY HIGH", "RISKY")):
             risk = explicit_risk
