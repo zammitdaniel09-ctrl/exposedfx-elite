@@ -425,31 +425,83 @@ def direction_from_text(text: str) -> Optional[str]:
 
 
 def extract_entry(text: str) -> Optional[tuple[float, float]]:
+    """
+    Robust entry extractor.
+
+    Fixes:
+    - XAUUSD BUY 4494-4493
+    - Gold buy 4496
+    - Xau/usd buy limit:4504 4502
+    - BUY LIMIT XAUUSD then price on next line
+    - 4498-96 -> 4498-4496
+    - Does NOT use SL/TP prices as fake entries
+    """
     raw = clean(text)
     up = raw.upper().replace("–", "-").replace("—", "-")
+    lines = [line.strip() for line in up.splitlines() if line.strip()]
 
-    patterns = [
-        # Entry: 4498-96 / Entry 4498 to 4496
-        rf"\b(?:ENTRY|ENTRIES|ENTER|ENTERING)\b(?:\s+(?:AROUND|AT|NOW))?\s*[:\-]?\s*({PRICE_RE})\s*(?:-|TO|/)\s*({PRICE_RE})",
-        rf"\b(?:ENTRY|ENTRIES|ENTER|ENTERING)\b(?:\s+(?:AROUND|AT|NOW))?\s*[:\-]?\s*({PRICE_RE})",
+    def nums_from(line: str):
+        return re.findall(PRICE_RE, line)
 
-        # Buy/Sell same-line entries only. Do NOT cross into SL/TP lines.
-        rf"\b(?:BUY|BUYS|BUYING|SELL|SELLS|SELLING|LONG|LONGS|SHORT|SHORTS)\b(?:\s+(?:NOW|LIMIT|STOP|ZONE|AT|AROUND))*[^\n]{0,80}?({PRICE_RE})\s*(?:-|TO|/)\s*({PRICE_RE})",
-        rf"\b(?:BUY|BUYS|BUYING|SELL|SELLS|SELLING|LONG|LONGS|SHORT|SHORTS)\b(?:\s+(?:NOW|LIMIT|STOP|ZONE|AT|AROUND))*[^\n]{0,80}?({PRICE_RE})",
-    ]
+    def make_entry(nums):
+        if not nums:
+            return None
 
-    for pat in patterns:
-        m = re.search(pat, up)
-        if not m:
-            continue
+        a = float(nums[0])
 
-        a = float(m.group(1))
-        if len(m.groups()) > 1 and m.group(2):
-            b = expand_shorthand_price(a, m.group(2))
+        if len(nums) >= 2:
+            b = expand_shorthand_price(a, nums[1])
         else:
             b = a
 
         return min(a, b), max(a, b)
+
+    # 1) Explicit Entry lines
+    for line in lines:
+        if not re.search(r"\b(ENTRY|ENTRIES|ENTER|ENTERING)\b", line):
+            continue
+
+        nums = nums_from(line)
+        result = make_entry(nums)
+        if result:
+            return result
+
+    # 2) Direction line with price on same line
+    direction_re = re.compile(r"\b(BUY|BUYS|BUYING|SELL|SELLS|SELLING|LONG|LONGS|SHORT|SHORTS)\b")
+    bad_entry_line_re = re.compile(r"\b(SL|S/L|STOP\s*LOSS|STOPLOSS|TP|TARGET|TAKE\s*PROFIT)\b")
+
+    for i, line in enumerate(lines):
+        if not direction_re.search(line):
+            continue
+
+        # If this same line is mainly an SL/TP line, don't use it as entry.
+        if bad_entry_line_re.search(line) and not re.search(r"\b(BUY|BUYS|BUYING|SELL|SELLS|SELLING|LONG|LONGS|SHORT|SHORTS)\b", line):
+            continue
+
+        nums = nums_from(line)
+
+        # Avoid NASDAQ 100 being treated as entry if it is the only number.
+        if len(nums) == 1 and re.search(r"\b(NASDAQ\s*100|NAS100|US100)\b", line):
+            nums = []
+
+        if nums:
+            # For BUY NASDAQ 100 18450, use the last real price if symbol number appears first.
+            if len(nums) >= 2 and re.search(r"\b(NASDAQ\s*100|NAS100|US100)\b", line):
+                nums = nums[-2:] if len(nums) >= 2 else nums[-1:]
+
+            result = make_entry(nums)
+            if result:
+                return result
+
+        # 3) Direction line, price on following line
+        for nxt in lines[i + 1:i + 4]:
+            if bad_entry_line_re.search(nxt):
+                continue
+
+            nums = nums_from(nxt)
+            result = make_entry(nums)
+            if result:
+                return result
 
     return None
 
