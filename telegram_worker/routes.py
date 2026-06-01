@@ -88,6 +88,16 @@ ROUTES = [
     {"name": "Route568 449", "source_chat": -1003788774930, "source_topic": 449, "dest_chat": -1003918958200, "dest_topic": 568},
     {"name": "Route568 445", "source_chat": -1003788774930, "source_topic": 445, "dest_chat": -1003918958200, "dest_topic": 568},
     {"name": "Route568 443", "source_chat": -1003788774930, "source_topic": 443, "dest_chat": -1003918958200, "dest_topic": 568},
+    # Auto-added: whole-source groups into ExposedFX topic 1927 with cross-source dedupe
+    {'name': 'Route1927 2452263621', 'source_chat': -1002452263621, 'source_topic': None, 'dest_chat': -1003918958200, 'dest_topic': 1927},
+    {'name': 'Route1927 2326717208', 'source_chat': -1002326717208, 'source_topic': None, 'dest_chat': -1003918958200, 'dest_topic': 1927},
+    {'name': 'Route1927 2916937359', 'source_chat': -1002916937359, 'source_topic': None, 'dest_chat': -1003918958200, 'dest_topic': 1927},
+    {'name': 'Route1927 2547450890', 'source_chat': -1002547450890, 'source_topic': None, 'dest_chat': -1003918958200, 'dest_topic': 1927},
+    {'name': 'Route1927 2561840111', 'source_chat': -1002561840111, 'source_topic': None, 'dest_chat': -1003918958200, 'dest_topic': 1927},
+    {'name': 'Route1927 3553298182', 'source_chat': -1003553298182, 'source_topic': None, 'dest_chat': -1003918958200, 'dest_topic': 1927},
+    {'name': 'Route1927 2148084647', 'source_chat': -1002148084647, 'source_topic': None, 'dest_chat': -1003918958200, 'dest_topic': 1927},
+    {'name': 'Route1927 1943031241', 'source_chat': -1001943031241, 'source_topic': None, 'dest_chat': -1003918958200, 'dest_topic': 1927},
+    {'name': 'Route1927 3887498399', 'source_chat': -1003887498399, 'source_topic': None, 'dest_chat': -1003918958200, 'dest_topic': 1927},
 ]
 
 if os.environ.get("DISABLE_PROVIDER_ROUTES", "0").strip() == "1":

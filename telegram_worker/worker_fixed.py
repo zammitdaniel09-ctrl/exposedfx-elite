@@ -41,6 +41,13 @@ MESSAGE_MAP_FILE = DATA_DIR / "message_map.json"
 DEDUP_FILE = DATA_DIR / "dedupe_map.json"
 DEDUP_WINDOW_SECONDS = int(os.environ.get("DEDUP_WINDOW_SECONDS", "900"))
 
+CROSS_SOURCE_DEDUP_DEST_TOPICS_RAW = os.environ.get("CROSS_SOURCE_DEDUP_DEST_TOPICS", "1927").strip()
+CROSS_SOURCE_DEDUP_DEST_TOPICS = {
+    int(x)
+    for x in re.split(r"[,\s]+", CROSS_SOURCE_DEDUP_DEST_TOPICS_RAW)
+    if x.strip()
+}
+
 BLOCKED_DEST_CHAT = int(os.environ.get("BLOCKED_DEST_CHAT", "-1003918958200"))
 BLOCKED_DEST_TOPICS_RAW = os.environ.get("BLOCKED_DEST_TOPICS", "1").strip()
 BLOCKED_DEST_TOPICS = {
@@ -166,13 +173,27 @@ def media_tag(message):
 
 
 def dedupe_key(route, message, text):
+    """
+    Normal dedupe keeps sources separate.
+    For selected destination topics, dedupe across different source groups too,
+    because providers often forward each other's exact messages.
+    """
+    cross_source = int(route["dest_topic"]) in CROSS_SOURCE_DEDUP_DEST_TOPICS
+
+    source_chat_key = "ANY_SOURCE" if cross_source else str(route["source_chat"])
+    source_topic_key = "ANY_TOPIC" if cross_source else str(route.get("source_topic"))
+
+    # For text/caption messages in cross-source dedupe topics, prioritise text.
+    # This blocks duplicate forwarded posts even if Telegram gives different media ids.
+    media_key = "TEXT_OR_CAPTION" if cross_source and normalise_for_dedupe(text) else media_tag(message)
+
     base = "|".join([
-        str(route["source_chat"]),
-        str(route.get("source_topic")),
+        source_chat_key,
+        source_topic_key,
         str(route["dest_chat"]),
         str(route["dest_topic"]),
         normalise_for_dedupe(text),
-        media_tag(message),
+        media_key,
     ])
     return hashlib.sha256(base.encode("utf-8", errors="ignore")).hexdigest()
 
@@ -655,6 +676,7 @@ async def main():
     log.info(f"Loaded {len(ROUTES)} routes")
     log.info(f"FORWARD_EDITED_MESSAGES={FORWARD_EDITED_MESSAGES}")
     log.info(f"DEDUP_WINDOW_SECONDS={DEDUP_WINDOW_SECONDS}")
+    log.info(f"CROSS_SOURCE_DEDUP_DEST_TOPICS={sorted(CROSS_SOURCE_DEDUP_DEST_TOPICS)}")
     log.info(f"BLOCKED_DEST_CHAT={BLOCKED_DEST_CHAT} BLOCKED_DEST_TOPICS={sorted(BLOCKED_DEST_TOPICS)}")
     log.info(f"PROCESS_GROUPED_MESSAGES_IN_NEW_HANDLER={PROCESS_GROUPED_MESSAGES_IN_NEW_HANDLER}")
     log.info(f"ENABLE_ALBUM_HANDLER={ENABLE_ALBUM_HANDLER}")
