@@ -279,10 +279,16 @@ def remember_signature(sig):
     return True
 
 
-def signature_for(result, key):
+def signature_for(result, key, source_msg_id=None):
+    """
+    Duplicate protection must not block fresh Telegram messages.
+    Include source_msg_id so repeated similar setups can still be sent.
+    Edits keep the same source_msg_id, so old packets can still be replaced.
+    """
     parsed = result.get("parsed") or {}
     base = "|".join([
         str(key),
+        str(source_msg_id or ""),
         str(parsed.get("symbol", "")),
         str(parsed.get("direction", "")),
         str(parsed.get("entry_low", "")),
@@ -290,8 +296,10 @@ def signature_for(result, key):
         str(parsed.get("sl", "")),
         ",".join(str(x) for x in parsed.get("tps", [])[:8]) if isinstance(parsed.get("tps"), list) else "",
     ])
-    if base.count("|") < 5:
-        base = result.get("message", "")
+
+    if base.count("|") < 6:
+        base = f"{key}|{source_msg_id or ''}|{result.get('message', '')}"
+
     return hashlib.sha256(base.encode("utf-8", errors="ignore")).hexdigest()
 
 
@@ -313,7 +321,7 @@ async def forward_original(message, text):
 
 
 async def send_full_signal(message, result, key, original_text, forward_raw=True):
-    sig = signature_for(result, key)
+    sig = signature_for(result, key, getattr(message, "id", None))
 
     # Only skip if a previous send actually succeeded.
     if sig in sent_signature_set:
