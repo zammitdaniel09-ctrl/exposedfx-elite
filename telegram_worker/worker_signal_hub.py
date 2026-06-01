@@ -236,6 +236,8 @@ def remember_signal_packet(message, key, sent_messages):
         log.info(f"[signal packet mapped] source_msg={message.id} -> dest_ids={ids}")
 
 
+signal_packet_map = load_packet_map()
+
 
 def trim_buffer(key):
     now = time.time()
@@ -311,7 +313,8 @@ async def forward_original(message, text):
 
 async def send_full_signal(message, result, key, original_text, forward_raw=True):
     sig = signature_for(result, key)
-    if not remember_signature(sig):
+
+    if sig in sent_signature_set:
         log.info("[signal hub skipped] duplicate signal packet")
         return False
 
@@ -350,8 +353,16 @@ async def send_full_signal(message, result, key, original_text, forward_raw=True
             sent_messages.append(source_sent)
 
         remember_signal_packet(message, key, sent_messages)
+        remember_signature(sig)
 
     except Exception as exc:
+        # Do NOT mark failed packets as duplicate.
+        sent_signature_set.discard(sig)
+        try:
+            sent_signatures.remove(sig)
+        except Exception:
+            pass
+
         log.exception(f"[signal hub packet send failed] {exc}")
         return False
 
