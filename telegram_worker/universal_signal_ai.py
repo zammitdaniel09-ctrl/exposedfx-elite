@@ -78,23 +78,50 @@ def is_trade_management_update(text: str) -> bool:
 
 
 def has_strict_new_signal_requirements(text: str) -> bool:
+    """
+    Final signal gate:
+    Must be a fresh setup with direction + entry + SL.
+    Accepts compact provider formats:
+    - Xau/usd buy :4502 4501
+    - XAUUSD Buy now@4499
+    - BUY LIMIT 4514.77
+    - XAUUSD BUY 4494-4493
+    """
     raw = clean(text)
     t = raw.upper()
 
     if is_trade_management_update(raw):
         return False
 
-    has_direction = bool(re.search(r"\b(BUY|BUYS|BUYING|SELL|SELLS|SELLING|LONG|LONGS|SHORT|SHORTS)\b", t))
-
-    has_entry = bool(
-        re.search(r"\b(ENTRY|ENTRIES|ENTER|ENTERING)\b[\s\S]{0,80}\d", t)
-        or re.search(r"\b(BUY|BUYS|SELL|SELLS)\s+(?:LIMIT|ZONE|NOW)?\b[\s\S]{0,80}\d", t)
-        or re.search(r"\b(LONG|LONGS|SHORT|SHORTS)\b[\s\S]{0,80}\d", t)
+    has_direction = bool(
+        re.search(r"\b(BUY|BUYS|BUYING|SELL|SELLS|SELLING|LONG|LONGS|SHORT|SHORTS)\b", t)
     )
 
-    has_sl = bool(re.search(r"\b(SL|S/L|STOP\s*LOSS|STOPLOSS)\b\s*(?:TO)?\s*[:\-]?\s*\d", t))
+    has_sl = bool(
+        re.search(r"\b(SL|S/L|STOP\s*LOSS|STOPLOSS)\b\s*(?:TO)?\s*[:@\-]?\s*\d", t)
+    )
 
-    return has_direction and has_entry and has_sl
+    if not (has_direction and has_sl):
+        return False
+
+    # Prefer actual parser result as the final entry test.
+    try:
+        parsed_entry = extract_entry(raw)
+        if parsed_entry is not None:
+            return True
+    except NameError:
+        pass
+    except Exception:
+        pass
+
+    # Fallback compact entry patterns before extract_entry is available.
+    compact_entry_patterns = [
+        rf"\b(?:BUY|BUYS|BUYING|SELL|SELLS|SELLING|LONG|LONGS|SHORT|SHORTS)\b\s*(?:NOW|LIMIT|STOP|ZONE)?\s*[:@\-]?\s*{PRICE_RE}",
+        rf"\b(?:BUY|BUYS|BUYING|SELL|SELLS|SELLING|LONG|LONGS|SHORT|SHORTS)\b[^\n]{{0,80}}{PRICE_RE}",
+        rf"\b(?:ENTRY|ENTRIES|ENTER|ENTERING)\b[^\n]{{0,80}}{PRICE_RE}",
+    ]
+
+    return any(re.search(pat, t) for pat in compact_entry_patterns)
 
 
 
