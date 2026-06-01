@@ -164,14 +164,24 @@ async def on_message(event):
 
     try:
         if COPY_MODE:
-            await client.send_message(
-                DEST_CHAT,
-                text,
-                formatting_entities=getattr(message, "entities", None),
-                parse_mode=None,
-                link_preview=False,
-            )
-            log.info(f"[COPIED SIGNAL] msg={message.id} -> {DEST_CHAT}")
+            if getattr(message, "media", None):
+                await client.send_file(
+                    DEST_CHAT,
+                    message.media,
+                    caption=text,
+                    formatting_entities=getattr(message, "entities", None),
+                    parse_mode=None,
+                )
+                log.info(f"[COPIED MEDIA SIGNAL] msg={message.id} -> {DEST_CHAT}")
+            else:
+                await client.send_message(
+                    DEST_CHAT,
+                    text,
+                    formatting_entities=getattr(message, "entities", None),
+                    parse_mode=None,
+                    link_preview=False,
+                )
+                log.info(f"[COPIED SIGNAL] msg={message.id} -> {DEST_CHAT}")
         else:
             await client.forward_messages(DEST_CHAT, message)
             log.info(f"[FORWARDED SIGNAL] msg={message.id} -> {DEST_CHAT}")
