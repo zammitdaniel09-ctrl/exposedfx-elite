@@ -30,6 +30,8 @@ SERVER_URL = os.environ.get("SERVER_URL", "").rstrip("/")
 AUTO_TOKEN = os.environ.get("AUTO_TOKEN", "change-this-token")
 DRY_RUN = os.environ.get("DRY_RUN", "0").strip() == "1"
 FORWARD_EDITED_MESSAGES = os.environ.get("FORWARD_EDITED_MESSAGES", "1").strip() == "1"
+PROCESS_GROUPED_MESSAGES_IN_NEW_HANDLER = os.environ.get("PROCESS_GROUPED_MESSAGES_IN_NEW_HANDLER", "1").strip() == "1"
+ENABLE_ALBUM_HANDLER = os.environ.get("ENABLE_ALBUM_HANDLER", "0").strip() == "1"
 
 DATA_DIR = Path(os.environ.get("DATA_DIR") or "./data")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -216,13 +218,45 @@ def entities_of(message):
     return getattr(message, "entities", None) or []
 
 
-def topic_of(message):
+
+def known_source_topics_for_chat(chat_id):
+    return {
+        int(r["source_topic"])
+        for r in ROUTES
+        if r["source_chat"] == chat_id and r.get("source_topic") is not None
+    }
+
+
+def unique_routes_for_source_chat(chat_id):
+    """
+    Fallback for groups where many source topics all go to ONE destination topic.
+    If Telegram gives bad/missing topic metadata for photo/video replies, we can still forward.
+    """
+    source_routes = [r for r in ROUTES if r["source_chat"] == chat_id]
+    if not source_routes:
+        return []
+
+    unique_dests = {(r["dest_chat"], r["dest_topic"]) for r in source_routes}
+    if len(unique_dests) != 1:
+        return []
+
+    first = dict(source_routes[0])
+    first["source_topic"] = None
+    first["name"] = first.get("name", "fallback") + " MEDIA FALLBACK"
+    return [first]
+
+
+
+def topic_of(message, chat_id=None):
     """
     Robust Telegram forum topic detection.
 
-    If topic_id is wrong/None, routes with source_topic never match,
-    so VIP messages silently stop forwarding.
+    Important fix:
+    For photo/video replies, reply_to_msg_id may be the message being replied to,
+    NOT the forum topic id. Only trust it when it matches a known route topic.
     """
+    known_topics = known_source_topics_for_chat(chat_id) if chat_id is not None else set()
+
     for attr in ("reply_to_top_id", "top_msg_id"):
         value = getattr(message, attr, None)
         if value:
@@ -231,16 +265,9 @@ def topic_of(message):
             except Exception:
                 pass
 
-    direct_reply_id = getattr(message, "reply_to_msg_id", None)
-    if direct_reply_id and getattr(message, "is_topic_message", False):
-        try:
-            return int(direct_reply_id)
-        except Exception:
-            pass
-
     reply = getattr(message, "reply_to", None)
     if reply:
-        for attr in ("reply_to_top_id", "top_msg_id", "reply_to_msg_id"):
+        for attr in ("reply_to_top_id", "top_msg_id"):
             value = getattr(reply, attr, None)
             if value:
                 try:
@@ -248,7 +275,28 @@ def topic_of(message):
                 except Exception:
                     pass
 
+    direct_reply_id = getattr(message, "reply_to_msg_id", None)
+    if direct_reply_id:
+        try:
+            direct_reply_id = int(direct_reply_id)
+            # Only treat reply_to_msg_id as topic if it is actually one of our route topics.
+            if not known_topics or direct_reply_id in known_topics:
+                return direct_reply_id
+        except Exception:
+            pass
+
+    if reply:
+        reply_msg_id = getattr(reply, "reply_to_msg_id", None)
+        if reply_msg_id:
+            try:
+                reply_msg_id = int(reply_msg_id)
+                if not known_topics or reply_msg_id in known_topics:
+                    return reply_msg_id
+            except Exception:
+                pass
+
     return None
+
 
 
 def same_source_and_destination(route, topic_id):
@@ -259,7 +307,7 @@ def same_source_and_destination(route, topic_id):
     )
 
 
-def routes_for(chat_id, topic_id):
+def routes_for(chat_id, topic_id, message=None):
     found = []
     for route in ROUTES:
         if route["source_chat"] != chat_id:
@@ -270,6 +318,22 @@ def routes_for(chat_id, topic_id):
             log.warning(f"[self-route skipped] {route['name']} {chat_id}_{topic_id}")
             continue
         found.append(route)
+
+    if found:
+        return found
+
+    # Media/reply fallback: if this source group has one destination topic,
+    # forward there even when Telegram gives missing/wrong topic id.
+    if message is not None and is_real_media(message):
+        fallback = unique_routes_for_source_chat(chat_id)
+        if fallback:
+            log.warning(
+                f"[media route fallback] source={chat_id}_{topic_id} "
+                f"msg={getattr(message, 'id', None)} -> "
+                f"dest={fallback[0]['dest_chat']}_{fallback[0]['dest_topic']}"
+            )
+            return fallback
+
     return found
 
 
@@ -399,6 +463,7 @@ async def copy_one(message, route, edited=False):
         return None
 
     if is_real_media(message):
+        log.info(f"[media copy] msg={message.id} route={route['name']} has_caption={bool(text)} reply_to={target_reply}")
         sent = await client.send_file(
             route["dest_chat"],
             message.media,
@@ -462,12 +527,12 @@ async def copy_album(messages, route):
 
 async def handle_single_message(event, edited=False):
     message = event.message
-    if getattr(message, "grouped_id", None):
+    if getattr(message, "grouped_id", None) and not PROCESS_GROUPED_MESSAGES_IN_NEW_HANDLER:
         return
 
     chat_id = event.chat_id
-    topic_id = topic_of(message)
-    routes = routes_for(chat_id, topic_id)
+    topic_id = topic_of(message, chat_id)
+    routes = routes_for(chat_id, topic_id, message)
     if not routes:
         log.info(f"[no route] source={chat_id}_{topic_id} msg={getattr(message, 'id', None)} text={text_of(message)[:80]!r}")
         return
@@ -512,13 +577,15 @@ async def on_message_edited(event):
 
 @client.on(events.Album(chats=SOURCE_CHATS))
 async def on_album(event):
+    if not ENABLE_ALBUM_HANDLER:
+        return
     if not event.messages:
         return
 
     first = event.messages[0]
     chat_id = event.chat_id
-    topic_id = topic_of(first)
-    routes = routes_for(chat_id, topic_id)
+    topic_id = topic_of(first, chat_id)
+    routes = routes_for(chat_id, topic_id, message)
     if not routes:
         return
 
@@ -560,6 +627,8 @@ async def main():
     log.info(f"Loaded {len(ROUTES)} routes")
     log.info(f"FORWARD_EDITED_MESSAGES={FORWARD_EDITED_MESSAGES}")
     log.info(f"DEDUP_WINDOW_SECONDS={DEDUP_WINDOW_SECONDS}")
+    log.info(f"PROCESS_GROUPED_MESSAGES_IN_NEW_HANDLER={PROCESS_GROUPED_MESSAGES_IN_NEW_HANDLER}")
+    log.info(f"ENABLE_ALBUM_HANDLER={ENABLE_ALBUM_HANDLER}")
     log.info("Imperium fixed Telegram worker running...")
     asyncio.create_task(stats.loop(client))
     log.info("Weekly stats reporter running for Sunday 00:00 Europe/Malta")
