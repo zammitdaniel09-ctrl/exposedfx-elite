@@ -25,13 +25,46 @@ def clean(text: str) -> str:
 
 
 
+
 def is_trade_management_update(text: str) -> bool:
     raw = clean(text)
     t = raw.upper()
     low = raw.lower()
 
+    has_direction = bool(re.search(r"\b(BUY|BUYS|BUYING|SELL|SELLS|SELLING|LONG|LONGS|SHORT|SHORTS)\b", t))
+    has_sl = bool(re.search(r"\b(SL|S/L|STOP\s*LOSS|STOPLOSS|STOP)\b\s*(?:TO)?\s*[:@\-]?\s*\d", t))
+    has_price = bool(re.search(rf"\b{PRICE_RE}\b", t))
+
+    # A real setup can contain "high risk" or "pips" and must NOT be blocked.
+    if has_direction and has_sl and has_price:
+        return False
+
+    management_patterns = [
+        r"\bTP\s*\d*\s*HIT\b",
+        r"\bBE\s*HIT\b",
+        r"\bSL\s*TO\s*BE\b",
+        r"\bSET\s*BE\b",
+        r"\bBREAK\s*EVEN\b",
+        r"\bBREAKEVEN\b",
+        r"\bCLOSE\b",
+        r"\bCLOSED\b",
+        r"\bCANCEL\b",
+        r"\bINVALID\b",
+        r"\bSTILL\s+RUNNING\b",
+        r"\bRUNNING\b",
+        r"\bPARTIAL\b",
+        r"\bSECURE\b",
+        r"\bCOLLECT\b",
+        r"\bWHOSE\s+IN\b",
+        r"\bANYONE\s+IN\b",
+        r"\bPIPS?\b",
+        r"\bR\s*\d+\s+\d+\s*PIPS?\b",
+    ]
+
+    if any(re.search(pat, t) for pat in management_patterns):
+        return True
+
     management_words = [
-        "partial",
         "take further",
         "take a partial",
         "running trade",
@@ -39,7 +72,6 @@ def is_trade_management_update(text: str) -> bool:
         "set stop loss",
         "move stop loss",
         "move sl",
-        "sl to",
         "stop loss to",
         "click close",
         "edit the lot size",
@@ -51,41 +83,14 @@ def is_trade_management_update(text: str) -> bool:
         "just looking after us",
     ]
 
-    recap_words = [
-        "pips",
-        "ended with",
-        "we ended",
-        "weekly recap",
-        "daily recap",
-        "results",
-        "profit today",
-        "pips secured",
-        "pips banked",
-    ]
-
-    has_management = any(x in low for x in management_words)
-    has_recap = any(x in low for x in recap_words)
-
-    has_direction = bool(re.search(r"\b(BUY|BUYS|BUYING|SELL|SELLS|SELLING|LONG|LONGS|SHORT|SHORTS)\b", t))
-    has_entry = bool(re.search(r"\b(ENTRY|ENTRIES|ENTER|ENTERING|BUY\s+LIMIT|SELL\s+LIMIT|BUY\s+ZONE|SELL\s+ZONE|BUY\s+NOW|SELL\s+NOW)\b", t))
-    has_sl = bool(re.search(r"\b(SL|S/L|STOP\s*LOSS|STOPLOSS)\b\s*(?:TO)?\s*[:\-]?\s*\d", t))
-
-    # Block updates/recaps unless they clearly contain a fresh setup.
-    if (has_management or has_recap) and not (has_direction and has_entry and has_sl):
-        return True
-
-    return False
+    return any(x in low for x in management_words)
 
 
 def has_strict_new_signal_requirements(text: str) -> bool:
     """
-    Final signal gate:
-    Must be a fresh setup with direction + entry + SL.
-    Accepts compact provider formats:
-    - Xau/usd buy :4502 4501
-    - XAUUSD Buy now@4499
-    - BUY LIMIT 4514.77
-    - XAUUSD BUY 4494-4493
+    Fresh setup gate.
+    A complete signal needs direction + SL + usable entry/price.
+    Split signals are handled by worker_signal_hub before this function.
     """
     raw = clean(text)
     t = raw.upper()
@@ -93,37 +98,24 @@ def has_strict_new_signal_requirements(text: str) -> bool:
     if is_trade_management_update(raw):
         return False
 
-    has_direction = bool(
-        re.search(r"\b(BUY|BUYS|BUYING|SELL|SELLS|SELLING|LONG|LONGS|SHORT|SHORTS)\b", t)
-    )
-
-    has_sl = bool(
-        re.search(r"\b(SL|S/L|STOP\s*LOSS|STOPLOSS)\b\s*(?:TO)?\s*[:@\-]?\s*\d", t)
-    )
+    has_direction = bool(re.search(r"\b(BUY|BUYS|BUYING|SELL|SELLS|SELLING|LONG|LONGS|SHORT|SHORTS)\b", t))
+    has_sl = bool(re.search(r"\b(SL|S/L|STOP\s*LOSS|STOPLOSS|STOP)\b\s*(?:TO)?\s*[:@\-]?\s*\d", t))
 
     if not (has_direction and has_sl):
         return False
 
-    # Prefer actual parser result as the final entry test.
     try:
-        parsed_entry = extract_entry(raw)
-        if parsed_entry is not None:
-            return True
-    except NameError:
-        pass
+        return extract_entry(raw) is not None
     except Exception:
         pass
 
-    # Fallback compact entry patterns before extract_entry is available.
-    compact_entry_patterns = [
-        rf"\b(?:BUY|BUYS|BUYING|SELL|SELLS|SELLING|LONG|LONGS|SHORT|SHORTS)\b\s*(?:NOW|LIMIT|STOP|ZONE)?\s*[:@\-]?\s*{PRICE_RE}",
+    compact_patterns = [
         rf"\b(?:BUY|BUYS|BUYING|SELL|SELLS|SELLING|LONG|LONGS|SHORT|SHORTS)\b[^\n]{{0,80}}{PRICE_RE}",
         rf"\b(?:ENTRY|ENTRIES|ENTER|ENTERING)\b[^\n]{{0,80}}{PRICE_RE}",
+        rf"^\s*{PRICE_RE}\s*(?:-|:|/)\s*{PRICE_RE}\s*$",
     ]
 
-    return any(re.search(pat, t) for pat in compact_entry_patterns)
-
-
+    return any(re.search(pat, t, re.M) for pat in compact_patterns)
 
 def normalize_symbol(symbol: str, text: str = "") -> str:
     raw = (text or "").upper()
@@ -182,16 +174,21 @@ def symbol_family(symbol: str) -> str:
     return "OTHER"
 
 
-def looks_like_signal(text: str) -> bool:
-    if not has_strict_new_signal_requirements(text):
-        return False
-    t = clean(text).upper()
-    has_price = bool(re.search(rf"\b{PRICE_RE}\b", t))
-    has_action = bool(re.search(r"\b(BUY|BUYS|BUYING|SELL|SELLS|SELLING|LONG|LONGS|SHORT|SHORTS|ENTERING|ENTRY|LIMIT)\b", t))
-    has_trade_word = bool(re.search(r"\b(SL|S/L|STOP|STOPLOSS|STOP\s*LOSS|TP\s*#?\s*\d*|TARGET\s*#?\s*\d*|TAKE\s*PROFIT|ENTRY|ENTRIES|LIMIT|ZONE|RISK|RISKY)\b", t))
-    has_symbol = bool(re.search(r"\b(XAUUSD|XAGUSD|GOLD|SILVER|BTC|ETH|SOL|NAS100|NASDAQ|US100|US30|US500|GER40|DAX|[A-Z]{6})\b", t))
-    return has_price and (has_action or has_trade_word or has_symbol)
 
+def looks_like_signal(text: str) -> bool:
+    raw = clean(text)
+    if has_strict_new_signal_requirements(raw):
+        return True
+
+    # Partial pieces are allowed into the buffer by worker_signal_hub.
+    t = raw.upper()
+    has_direction = bool(re.search(r"\b(BUY|BUYS|BUYING|SELL|SELLS|SELLING|LONG|LONGS|SHORT|SHORTS|ENTER)\b", t))
+    has_symbol = bool(re.search(r"\b(XAUUSD|XAGUSD|GOLD|SILVER|BTC|ETH|SOL|NAS100|NASDAQ|US100|US30|US500|GER40|DAX|[A-Z]{6})\b", t))
+    has_sl_or_tp = bool(re.search(r"\b(SL|S/L|STOP|STOPLOSS|STOP\s*LOSS|TP|TARGET|TAKE\s*PROFIT)\b", t))
+    has_price = bool(re.search(rf"\b{PRICE_RE}\b", t))
+    bare_range = bool(re.search(rf"^\s*{PRICE_RE}\s*(?:-|:|/)\s*{PRICE_RE}\s*$", t, re.M))
+
+    return (has_direction and (has_symbol or has_price)) or (has_sl_or_tp and has_price) or bare_range
 
 def forex_pip_size(symbol: str) -> float:
     s = (symbol or "").upper().replace("/", "")
@@ -340,35 +337,39 @@ def expand_shorthand_price(first: float, second_text: str) -> float:
     return second
 
 
+
 def convert_distance_sl_if_needed(symbol: str, direction: str, entry_mid: float, sl_value: float, text: str) -> float:
     """
     Converts distance-style SL into chart price.
-    Example: Gold buy 4496 / SL 40pip -> SL 4492
+
+    Gold rule:
+    10 pips = $1
+    40 pips = $4
+    100 pips = $10
     """
     raw = clean(text)
     up = raw.upper()
-
-    has_sl_distance_word = bool(
-        re.search(r"\b(?:SL|S/L|STOP\s*LOSS|STOPLOSS|STOP)\b\s*[:\-]?\s*\d+(?:\.\d+)?\s*(?:PIP|PIPS|POINT|POINTS)\b", up)
-        or re.search(r"\b\d+(?:\.\d+)?\s*(?:PIP|PIPS|POINT|POINTS)\b", up)
-    )
-
-    if not has_sl_distance_word:
-        return float(sl_value)
-
     entry_mid = float(entry_mid)
     sl_value = float(sl_value)
 
-    # If already a real chart price close to entry, leave it.
-    if entry_mid and abs(sl_value - entry_mid) / entry_mid < 0.10:
+    # If SL is already a chart price close to entry, keep it.
+    if entry_mid and abs(sl_value - entry_mid) / entry_mid < 0.15:
         return sl_value
 
-    distance = sl_value * pip_value_for_symbol(symbol)
+    sl_distance_match = re.search(
+        r"\b(?:SL|S/L|STOP\s*LOSS|STOPLOSS|STOP)\b\s*(?:TO)?\s*[:@\-]?\s*(\d+(?:\.\d+)?)\s*(PIP|PIPS|POINT|POINTS)\b",
+        up,
+    )
+
+    if not sl_distance_match:
+        return sl_value
+
+    distance_units = float(sl_distance_match.group(1))
+    distance = distance_units * pip_value_for_symbol(symbol)
 
     if direction == "BUY":
         return entry_mid - distance
     return entry_mid + distance
-
 
 def invalid_tp_for_direction(direction: str, entry: float, tp: float) -> bool:
     if direction == "BUY":
@@ -567,8 +568,107 @@ def extract_tps(text: str) -> tuple[list[float], bool]:
     return vals, tp_open
 
 
+
+def normalise_xau_shorthand_entry_with_sl(symbol: str, direction: str, entry: tuple[float, float], sl: float) -> tuple[float, float]:
+    """
+    Handles gold shorthand entries:
+    Buy now 20-16 + SL 4512 -> 4516-4520
+    4424 / 4429 + SL 4433 stays unchanged.
+    """
+    try:
+        lo, hi = float(entry[0]), float(entry[1])
+        sl = float(sl)
+    except Exception:
+        return entry
+
+    if symbol_family(symbol) != "GOLD":
+        return entry
+
+    if hi >= 1000 or sl < 1000:
+        return entry
+
+    base = int(sl // 100) * 100
+    values = [base + lo, base + hi]
+
+    # If reconstructed entry is on the wrong side of SL, try the next/previous 100 block.
+    if direction == "BUY" and max(values) <= sl:
+        values = [v + 100 for v in values]
+    elif direction == "SELL" and min(values) >= sl:
+        values = [v - 100 for v in values]
+
+    return min(values), max(values)
+
+
+def reasonable_tp_price(symbol: str, entry_mid: float, tp: float) -> bool:
+    try:
+        entry_mid = float(entry_mid)
+        tp = float(tp)
+    except Exception:
+        return False
+
+    fam = symbol_family(symbol)
+
+    # Reject accidental times/labels like TP: scalp dump 5:00 on gold.
+    if fam == "GOLD" and tp < 1000:
+        return False
+    if fam == "FOREX" and tp > 100:
+        return False
+    if entry_mid and abs(tp - entry_mid) / entry_mid > 0.50:
+        return False
+    return True
+
+
+def extract_tps_contextual(text: str, symbol: str, direction: str, entry_mid: float) -> tuple[list[float], bool]:
+    vals: list[float] = []
+    tp_open = False
+    sign = 1 if direction == "BUY" else -1
+
+    for line in clean(text).splitlines():
+        u = line.upper().strip()
+        if not re.search(r"\b(TP|TARGET|TAKE\s*PROFIT)\b", u):
+            continue
+
+        if re.search(r"\bOPEN\b", u):
+            tp_open = True
+
+        # Ignore obvious time-only phrases, e.g. "Tp: scalp dump 5:00".
+        if re.search(r"\b\d{1,2}:\d{2}\b", u) and not re.search(r"\b\d{3,7}(?:\.\d+)?\b", u):
+            continue
+
+        body = re.sub(r"\b(?:TP|TARGET|TAKE\s*PROFIT)\s*#?\s*\d*\b", "", u, flags=re.I)
+        body = re.sub(r"^[\s:#@\-\._]+", "", body)
+
+        if "SAME AS ABOVE" in body:
+            continue
+
+        nums = re.findall(PRICE_RE, body)
+        if not nums:
+            continue
+
+        if re.search(r"\b(PIP|PIPS|POINT|POINTS)\b", body):
+            distance_units = float(nums[-1])
+            tp = float(entry_mid) + sign * distance_units * pip_value_for_symbol(symbol)
+            if not invalid_tp_for_direction(direction, entry_mid, tp) and reasonable_tp_price(symbol, entry_mid, tp):
+                vals.append(tp)
+            continue
+
+        # Normal price TP line. For "Tp:4508-4511-4520", collect all TP prices.
+        for n in nums:
+            tp = float(n)
+            if invalid_tp_for_direction(direction, entry_mid, tp):
+                continue
+            if not reasonable_tp_price(symbol, entry_mid, tp):
+                continue
+            if tp not in vals:
+                vals.append(tp)
+
+    return vals, tp_open
+
+
+
 def regex_extract(text: str) -> Optional[Dict[str, Any]]:
     raw = clean(text)
+
     if not has_strict_new_signal_requirements(raw):
         return None
     if not looks_like_signal(raw):
@@ -581,20 +681,22 @@ def regex_extract(text: str) -> Optional[Dict[str, Any]]:
     symbol = normalize_symbol("", raw)
     entry = extract_entry(raw)
     sl = extract_sl(raw)
-    tps, tp_open = extract_tps(raw)
 
     if entry is None or sl is None:
         return None
+
+    entry = normalise_xau_shorthand_entry_with_sl(symbol, direction, entry, sl)
+    mid = (float(entry[0]) + float(entry[1])) / 2
+    sl = convert_distance_sl_if_needed(symbol, direction, mid, sl, raw)
+
+    tps, tp_open = extract_tps_contextual(raw, symbol, direction, mid)
+
     if not tps and not tp_open:
         if AUTO_TP_IF_MISSING:
             tp_open = True
         else:
             return None
 
-    mid = (entry[0] + entry[1]) / 2
-    sl = convert_distance_sl_if_needed(symbol, direction, mid, sl, raw)
-
-    # Remove impossible TPs that are on the wrong side.
     tps = [tp for tp in tps if not invalid_tp_for_direction(direction, mid, float(tp))]
 
     if not tps and not tp_open:
@@ -607,15 +709,14 @@ def regex_extract(text: str) -> Optional[Dict[str, Any]]:
         "is_signal": True,
         "symbol": symbol,
         "direction": direction,
-        "entry_low": entry[0],
-        "entry_high": entry[1],
-        "sl": sl,
+        "entry_low": float(entry[0]),
+        "entry_high": float(entry[1]),
+        "sl": float(sl),
         "tps": estimate_tps(symbol, direction, mid, sl, tps, tp_open),
         "tp_open": True,
         "risk": risk_from_text(raw, symbol, mid, sl),
-        "layer_point": estimate_layer(direction, entry[0], entry[1], sl),
+        "layer_point": estimate_layer(direction, float(entry[0]), float(entry[1]), sl),
     }
-
 
 def parse_jsonish(value: str) -> Optional[Dict[str, Any]]:
     try:

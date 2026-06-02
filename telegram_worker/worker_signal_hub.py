@@ -65,6 +65,9 @@ ALLOWED_SOURCE_TOPICS = topic_set_from_env("ALLOWED_SOURCE_TOPICS", DEFAULT_ALLO
 buffers = defaultdict(lambda: deque(maxlen=BUFFER_MAX_MESSAGES))
 sent_signatures = deque(maxlen=300)
 sent_signature_set = set()
+sent_content_signatures = deque(maxlen=600)
+sent_content_signature_set = set()
+last_signal_context = {}
 
 TOPIC_NAMES = {
     2: "Triad FX",
@@ -281,6 +284,102 @@ def looks_like_fresh_signal_start(text: str) -> bool:
     return has_direction and (has_entry or has_symbol)
 
 
+
+def extract_tp_context_from_result(result):
+    parsed = result.get("parsed") or {}
+    tps = parsed.get("tps") or []
+    lines = []
+
+    for i, tp in enumerate(tps[:8], start=1):
+        try:
+            lines.append(f"TP{i} {float(tp):.5f}".rstrip("0").rstrip("."))
+        except Exception:
+            pass
+
+    if lines:
+        return "\n".join(lines)
+    return ""
+
+
+def remember_last_signal_context(key, result):
+    tp_text = extract_tp_context_from_result(result)
+    if tp_text:
+        last_signal_context[key] = {
+            "ts": time.time(),
+            "tp_text": tp_text,
+            "result": result,
+        }
+
+
+def apply_same_as_above_context(key, text):
+    t = (text or "").upper()
+    if "SAME AS ABOVE" not in t:
+        return text
+
+    ctx = last_signal_context.get(key) or {}
+    tp_text = ctx.get("tp_text") or ""
+
+    if not tp_text:
+        return text
+
+    log.info(f"[signal hub context] applying previous TP context key={key}")
+    return text + "\n" + tp_text
+
+
+def looks_like_partial_signal_piece(text: str) -> bool:
+    raw = (text or "").strip()
+    if not raw:
+        return False
+
+    t = raw.upper()
+
+    # Management/recap-only messages should not enter the signal buffer.
+    recap_only = bool(re.search(r"\b(TP\s*\d*\s*HIT|PIPS?\s*[✅🎯💥🔥]?|BE\s*HIT|SL\s*TO\s*BE|CLOSE|CLOSED|CANCEL|INVALID|STILL\s+RUNNING)\b", t))
+    has_setup_word = bool(re.search(r"\b(BUY|SELL|LONG|SHORT|ENTRY|ENTER|SL|STOP|TP|TARGET)\b", t))
+    if recap_only and not has_setup_word:
+        return False
+
+    if re.search(r"\b(BUY|BUYS|BUYING|SELL|SELLS|SELLING|LONG|LONGS|SHORT|SHORTS|ENTER)\b", t):
+        return True
+    if re.search(r"\b(SL|S/L|STOP|STOPLOSS|STOP\s*LOSS|TP|TARGET|TAKE\s*PROFIT)\b", t):
+        return True
+    if re.search(rf"^\s*{PRICE_RE}\s*(?:-|:|/)\s*{PRICE_RE}\s*$", t, re.M):
+        return True
+    if "SAME AS ABOVE" in t:
+        return True
+    if re.search(r"\bENTERED\s+AT\s+\d", t):
+        return True
+
+    return False
+
+
+def content_signature_for(result, key):
+    parsed = result.get("parsed") or {}
+    parts = [
+        str(key),
+        str(parsed.get("symbol", "")),
+        str(parsed.get("direction", "")),
+        f"{float(parsed.get('entry_low', 0)):.5f}",
+        f"{float(parsed.get('entry_high', 0)):.5f}",
+        f"{float(parsed.get('sl', 0)):.5f}",
+        ",".join(f"{float(x):.5f}" for x in (parsed.get("tps") or [])[:8]),
+    ]
+    return hashlib.sha256("|".join(parts).encode("utf-8", errors="ignore")).hexdigest()
+
+
+def remember_content_signature(sig):
+    if sig in sent_content_signature_set:
+        return False
+    sent_content_signature_set.add(sig)
+    sent_content_signatures.append(sig)
+
+    while len(sent_content_signature_set) > len(sent_content_signatures):
+        sent_content_signature_set.clear()
+        sent_content_signature_set.update(sent_content_signatures)
+
+    return True
+
+
 def remember_signature(sig):
     if sig in sent_signature_set:
         return False
@@ -335,15 +434,17 @@ async def forward_original(message, text):
 
 async def send_full_signal(message, result, key, original_text, forward_raw=True):
     sig = signature_for(result, key, getattr(message, "id", None))
+    content_sig = content_signature_for(result, key)
 
-    # Only skip if a previous send actually succeeded.
     if sig in sent_signature_set:
         log.info("[signal hub skipped] duplicate signal packet")
         return False
 
+    if content_sig in sent_content_signature_set:
+        log.info("[signal hub skipped] duplicate content signal")
+        return False
+
     try:
-        # If this source message was edited and already produced a packet,
-        # delete the old original + old AI format + old source first.
         await delete_existing_signal_packet(message, key)
 
         original_sent = None
@@ -376,15 +477,21 @@ async def send_full_signal(message, result, key, original_text, forward_raw=True
             sent_messages.append(source_sent)
 
         remember_signal_packet(message, key, sent_messages)
-
-        # Mark duplicate only after full packet succeeded.
         remember_signature(sig)
+        remember_content_signature(content_sig)
+        remember_last_signal_context(key, result)
 
     except Exception as exc:
-        # Never duplicate-lock failed sends.
         sent_signature_set.discard(sig)
+        sent_content_signature_set.discard(content_sig)
+
         try:
             sent_signatures.remove(sig)
+        except Exception:
+            pass
+
+        try:
+            sent_content_signatures.remove(content_sig)
         except Exception:
             pass
 
@@ -413,7 +520,8 @@ async def on_signal_hub_message(event):
         log.info(f"[signal hub seen] msg={message.id} topic={topic_id_of(message)} text={text[:80]}")
 
         # First try this message alone. Complete setups should not enter the partial buffer.
-        result = extract_and_format(text, source_name, message.id)
+        standalone_text = apply_same_as_above_context(key, text)
+        result = extract_and_format(standalone_text, source_name, message.id)
         if result:
             await send_full_signal(message, result, key, text, forward_raw=True)
             return
@@ -422,7 +530,7 @@ async def on_signal_hub_message(event):
             log.info("[signal hub skipped] not a clean signal")
             return
 
-        if not looks_like_signal(text):
+        if not (looks_like_signal(text) or looks_like_partial_signal_piece(text)):
             log.info("[signal hub skipped] not signal-like")
             return
 
@@ -438,7 +546,7 @@ async def on_signal_hub_message(event):
         # Do NOT forward candidate messages yet.
         # Only forward the original after the setup is fully confirmed and formatted.
 
-        combined = combined_text_for(key)
+        combined = apply_same_as_above_context(key, combined_text_for(key))
         result = extract_and_format(combined, source_name, message.id)
         if result:
             raw_msg = first_buffer_message(key) or message
@@ -473,6 +581,8 @@ async def main():
     log.info("AI/source replies to the forwarded original: True")
     log.info(f"Universal AI extractor active for any pair")
     log.info(f"Partial signal buffer: {PARTIAL_BUFFER_ENABLED} | window={BUFFER_WINDOW_SECONDS}s | max={BUFFER_MAX_MESSAGES}")
+    log.info(f"Content signal dedupe active: True")
+    log.info(f"TP same-as-above context active: True")
     await admin_startup(client)
     asyncio.create_task(admin_loop(client, stats))
     await client.run_until_disconnected()
