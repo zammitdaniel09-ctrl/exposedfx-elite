@@ -462,11 +462,16 @@ def extract_entry(text: str) -> Optional[tuple[float, float]]:
     - Xau/usd buy limit:4504 4502
     - BUY LIMIT XAUUSD then price on next line
     - 4498-96 -> 4498-4496
-    - Does NOT use SL/TP prices as fake entries
+    - 4424 / 4429 after "gold sell now r 2"
+    - ignores R1/R2/risk numbers as fake entries
+    - does NOT use SL/TP prices as fake entries
     """
     raw = clean(text)
     up = raw.upper().replace("–", "-").replace("—", "-")
     lines = [line.strip() for line in up.splitlines() if line.strip()]
+
+    direction_re = re.compile(r"\\b(BUY|BUYS|BUYING|SELL|SELLS|SELLING|LONG|LONGS|SHORT|SHORTS)\\b")
+    bad_entry_line_re = re.compile(r"\\b(SL|S/L|STOP\\s*LOSS|STOPLOSS|TP|TARGET|TAKE\\s*PROFIT)\\b")
 
     def nums_from(line: str):
         return re.findall(PRICE_RE, line)
@@ -484,49 +489,90 @@ def extract_entry(text: str) -> Optional[tuple[float, float]]:
 
         return min(a, b), max(a, b)
 
+    def is_probable_real_price(v: float) -> bool:
+        # Gold/default chart prices should not be tiny R1/R2 style labels.
+        # Forex can be < 10, but forex symbols are normally explicit 6-letter pairs.
+        if "GOLD" in up or "XAU" in up or not re.search(r"\\b[A-Z]{6}\\b", up):
+            return v >= 1000
+        return v > 0
+
+    def clean_entry_nums(line: str):
+        nums = nums_from(line)
+
+        filtered = []
+        for n in nums:
+            # Ignore R1 / R 1 / R2 / R 2 labels.
+            if re.search(rf"\\bR\\s*{re.escape(n)}\\b", line):
+                continue
+
+            # Ignore risk labels like risk 2.
+            if re.search(rf"\\bRISK\\s*{re.escape(n)}\\b", line):
+                continue
+
+            filtered.append(n)
+
+        nums = filtered
+
+        # If only one tiny number is found on a direction line, it is probably R2 / risk label.
+        if len(nums) == 1:
+            try:
+                v = float(nums[0])
+                if not is_probable_real_price(v):
+                    return []
+            except Exception:
+                return []
+
+        return nums
+
     # 1) Explicit Entry lines
     for line in lines:
-        if not re.search(r"\b(ENTRY|ENTRIES|ENTER|ENTERING)\b", line):
+        if not re.search(r"\\b(ENTRY|ENTRIES|ENTER|ENTERING|ENTERED\\s+AT)\\b", line):
             continue
 
-        nums = nums_from(line)
+        nums = clean_entry_nums(line)
         result = make_entry(nums)
         if result:
             return result
 
-    # 2) Direction line with price on same line
-    direction_re = re.compile(r"\b(BUY|BUYS|BUYING|SELL|SELLS|SELLING|LONG|LONGS|SHORT|SHORTS)\b")
-    bad_entry_line_re = re.compile(r"\b(SL|S/L|STOP\s*LOSS|STOPLOSS|TP|TARGET|TAKE\s*PROFIT)\b")
+    # 2) Prefer bare price ranges before/after direction, e.g. "4424 / 4429"
+    for line in lines:
+        if bad_entry_line_re.search(line):
+            continue
 
+        if re.search(rf"^\\s*{PRICE_RE}\\s*(?:-|:|/)\\s*{PRICE_RE}\\s*$", line):
+            nums = nums_from(line)
+            result = make_entry(nums)
+            if result:
+                return result
+
+    # 3) Direction line with real price on same line
     for i, line in enumerate(lines):
         if not direction_re.search(line):
             continue
 
-        # If this same line is mainly an SL/TP line, don't use it as entry.
-        if bad_entry_line_re.search(line) and not re.search(r"\b(BUY|BUYS|BUYING|SELL|SELLS|SELLING|LONG|LONGS|SHORT|SHORTS)\b", line):
+        if bad_entry_line_re.search(line) and not direction_re.search(line):
             continue
 
-        nums = nums_from(line)
+        nums = clean_entry_nums(line)
 
         # Avoid NASDAQ 100 being treated as entry if it is the only number.
-        if len(nums) == 1 and re.search(r"\b(NASDAQ\s*100|NAS100|US100)\b", line):
+        if len(nums) == 1 and re.search(r"\\b(NASDAQ\\s*100|NAS100|US100)\\b", line):
             nums = []
 
         if nums:
-            # For BUY NASDAQ 100 18450, use the last real price if symbol number appears first.
-            if len(nums) >= 2 and re.search(r"\b(NASDAQ\s*100|NAS100|US100)\b", line):
-                nums = nums[-2:] if len(nums) >= 2 else nums[-1:]
+            if len(nums) >= 2 and re.search(r"\\b(NASDAQ\\s*100|NAS100|US100)\\b", line):
+                nums = nums[-2:]
 
             result = make_entry(nums)
             if result:
                 return result
 
-        # 3) Direction line, price on following line
-        for nxt in lines[i + 1:i + 4]:
+        # 4) Direction line, price on following line
+        for nxt in lines[i + 1:i + 5]:
             if bad_entry_line_re.search(nxt):
                 continue
 
-            nums = nums_from(nxt)
+            nums = clean_entry_nums(nxt)
             result = make_entry(nums)
             if result:
                 return result
