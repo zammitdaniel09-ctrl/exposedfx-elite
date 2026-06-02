@@ -470,8 +470,8 @@ def extract_entry(text: str) -> Optional[tuple[float, float]]:
     up = raw.upper().replace("–", "-").replace("—", "-")
     lines = [line.strip() for line in up.splitlines() if line.strip()]
 
-    direction_re = re.compile(r"\\b(BUY|BUYS|BUYING|SELL|SELLS|SELLING|LONG|LONGS|SHORT|SHORTS)\\b")
-    bad_entry_line_re = re.compile(r"\\b(SL|S/L|STOP\\s*LOSS|STOPLOSS|TP|TARGET|TAKE\\s*PROFIT)\\b")
+    direction_re = re.compile(r"\b(BUY|BUYS|BUYING|SELL|SELLS|SELLING|LONG|LONGS|SHORT|SHORTS)\b")
+    bad_entry_line_re = re.compile(r"\b(SL|S/L|STOP\s*LOSS|STOPLOSS|TP|TARGET|TAKE\s*PROFIT)\b")
 
     def nums_from(line: str):
         return re.findall(PRICE_RE, line)
@@ -492,7 +492,7 @@ def extract_entry(text: str) -> Optional[tuple[float, float]]:
     def is_probable_real_price(v: float) -> bool:
         # Gold/default chart prices should not be tiny R1/R2 style labels.
         # Forex can be < 10, but forex symbols are normally explicit 6-letter pairs.
-        if "GOLD" in up or "XAU" in up or not re.search(r"\\b[A-Z]{6}\\b", up):
+        if "GOLD" in up or "XAU" in up or not re.search(r"\b[A-Z]{6}\b", up):
             return v >= 1000
         return v > 0
 
@@ -502,11 +502,11 @@ def extract_entry(text: str) -> Optional[tuple[float, float]]:
         filtered = []
         for n in nums:
             # Ignore R1 / R 1 / R2 / R 2 labels.
-            if re.search(rf"\\bR\\s*{re.escape(n)}\\b", line):
+            if re.search(rf"\bR\s*{re.escape(n)}\b", line):
                 continue
 
             # Ignore risk labels like risk 2.
-            if re.search(rf"\\bRISK\\s*{re.escape(n)}\\b", line):
+            if re.search(rf"\bRISK\s*{re.escape(n)}\b", line):
                 continue
 
             filtered.append(n)
@@ -526,7 +526,7 @@ def extract_entry(text: str) -> Optional[tuple[float, float]]:
 
     # 1) Explicit Entry lines
     for line in lines:
-        if not re.search(r"\\b(ENTRY|ENTRIES|ENTER|ENTERING|ENTERED\\s+AT)\\b", line):
+        if not re.search(r"\b(ENTRY|ENTRIES|ENTER|ENTERING|ENTERED\s+AT)\b", line):
             continue
 
         nums = clean_entry_nums(line)
@@ -539,7 +539,7 @@ def extract_entry(text: str) -> Optional[tuple[float, float]]:
         if bad_entry_line_re.search(line):
             continue
 
-        if re.search(rf"^\\s*{PRICE_RE}\\s*(?:-|:|/)\\s*{PRICE_RE}\\s*$", line):
+        if re.search(rf"^\s*{PRICE_RE}\s*(?:-|:|/)\s*{PRICE_RE}\s*$", line):
             nums = nums_from(line)
             result = make_entry(nums)
             if result:
@@ -556,11 +556,11 @@ def extract_entry(text: str) -> Optional[tuple[float, float]]:
         nums = clean_entry_nums(line)
 
         # Avoid NASDAQ 100 being treated as entry if it is the only number.
-        if len(nums) == 1 and re.search(r"\\b(NASDAQ\\s*100|NAS100|US100)\\b", line):
+        if len(nums) == 1 and re.search(r"\b(NASDAQ\s*100|NAS100|US100)\b", line):
             nums = []
 
         if nums:
-            if len(nums) >= 2 and re.search(r"\\b(NASDAQ\\s*100|NAS100|US100)\\b", line):
+            if len(nums) >= 2 and re.search(r"\b(NASDAQ\s*100|NAS100|US100)\b", line):
                 nums = nums[-2:]
 
             result = make_entry(nums)
