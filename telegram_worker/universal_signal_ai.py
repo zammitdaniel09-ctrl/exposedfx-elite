@@ -625,7 +625,7 @@ def extract_tps_contextual(text: str, symbol: str, direction: str, entry_mid: fl
 
     for line in clean(text).splitlines():
         u = line.upper().strip()
-        if not re.search(r"\b(TP|TARGET|TAKE\s*PROFIT)\b", u):
+        if not re.search(r"\b(?:TP\s*#?\s*\d*|TARGET\s*#?\s*\d*|TAKE\s*PROFIT\s*#?\s*\d*)\b", u):
             continue
 
         if re.search(r"\bOPEN\b", u):
@@ -635,7 +635,7 @@ def extract_tps_contextual(text: str, symbol: str, direction: str, entry_mid: fl
         if re.search(r"\b\d{1,2}:\d{2}\b", u) and not re.search(r"\b\d{3,7}(?:\.\d+)?\b", u):
             continue
 
-        body = re.sub(r"\b(?:TP|TARGET|TAKE\s*PROFIT)\s*#?\s*\d*\b", "", u, flags=re.I)
+        body = re.sub(r"\b(?:TP\s*#?\s*\d*|TARGET\s*#?\s*\d*|TAKE\s*PROFIT\s*#?\s*\d*)\b", "", u, flags=re.I)
         body = re.sub(r"^[\s:#@\-\._]+", "", body)
 
         if "SAME AS ABOVE" in body:
