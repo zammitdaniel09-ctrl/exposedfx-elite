@@ -633,7 +633,7 @@ async def handle_single_message(event, edited=False):
 
     chat_id = event.chat_id
     topic_id = topic_of(message, chat_id)
-    routes = routes_for(chat_id, topic_id, first)
+    routes = routes_for(chat_id, topic_id, message)
     if not routes:
         log.info(f"[no route] source={chat_id}_{topic_id} msg={getattr(message, 'id', None)} text={text_of(message)[:80]!r}")
         return
