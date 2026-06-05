@@ -13,6 +13,8 @@ from telethon import TelegramClient, events
 from telethon.errors import FloodWaitError
 from telethon.tl.types import MessageMediaWebPage
 
+from telegram_worker.runtime_guard import start_runtime_guard, alert_crash
+from telegram_worker.provider_profiles import is_promo_text
 from telegram_worker.routes import ROUTES
 from telegram_worker.parser import parse_signal
 from telegram_worker.stats_reporter import WeeklyStats
@@ -724,6 +726,10 @@ async def handle_single_message(event, edited=False):
     if is_blocked_sender(message):
         log.warning(f"[blocked sender] ids={sorted(sender_ids_for_message(message))} msg={getattr(message, 'id', None)}")
         return
+
+    if is_promo_text(text_of(message), topic_id_of(message)):
+        log.info(f"[promo blocked incoming] msg={getattr(message, 'id', None)}")
+        return
     if getattr(message, "grouped_id", None) and not PROCESS_GROUPED_MESSAGES_IN_NEW_HANDLER:
         return
 
@@ -817,6 +823,7 @@ async def on_album(event):
 
 
 async def main():
+    await start_runtime_guard("imperium-telegram-worker", log)
     await client.connect()
     if not await client.is_user_authorized():
         raise RuntimeError("Telegram login file loaded but account is not authorised. Regenerate the local session and Railway chunks.")

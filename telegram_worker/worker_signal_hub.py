@@ -12,6 +12,8 @@ from telethon import events
 
 from telegram_worker.worker_fixed import client, stats
 from telegram_worker.admin_features import ADMIN_CHAT, admin_startup, admin_loop, handle_admin_command
+from telegram_worker.runtime_guard import start_runtime_guard, alert_crash
+from telegram_worker.provider_profiles import apply_provider_profile, is_promo_text
 from telegram_worker.universal_signal_ai import extract_and_format, looks_like_signal
 
 log = logging.getLogger("exposedfx-ai-signal-formatter")
@@ -68,6 +70,8 @@ sent_signature_set = set()
 sent_content_signatures = deque(maxlen=600)
 sent_content_signature_set = set()
 last_signal_context = {}
+active_signal_lifecycle = {}
+last_active_signal_by_topic = {}
 
 TOPIC_NAMES = {
     2: "Triad FX",
@@ -288,6 +292,183 @@ async def maybe_send_signal_update_reply(message, key, text):
     return True
 
 
+
+def lifecycle_key_for(message, key):
+    return f"{SIGNAL_SOURCE_CHAT}:{key}:{message.id}"
+
+
+def norm_price_for_dedupe(symbol, value):
+    try:
+        v = float(value)
+    except Exception:
+        return "0"
+
+    symbol = str(symbol or "").upper()
+
+    if symbol in ("XAUUSD", "GOLD"):
+        return f"{round(v / 1.0) * 1.0:.1f}"
+
+    if symbol in ("BTCUSD", "BTC"):
+        return f"{round(v / 50.0) * 50.0:.0f}"
+
+    if symbol in ("NAS100", "US100", "NASDAQ", "US30", "US500"):
+        return f"{round(v / 10.0) * 10.0:.0f}"
+
+    if v < 10:
+        return f"{v:.4f}"
+
+    return f"{v:.2f}"
+
+
+def content_signature_for(result, key):
+    parsed = result.get("parsed") or {}
+
+    symbol = str(parsed.get("symbol", ""))
+    direction = str(parsed.get("direction", ""))
+    order_type = str(parsed.get("order_type", ""))
+
+    tps = parsed.get("tps") or []
+    tp_key = ",".join(norm_price_for_dedupe(symbol, x) for x in tps[:3])
+
+    parts = [
+        str(key),
+        symbol,
+        direction,
+        order_type,
+        norm_price_for_dedupe(symbol, parsed.get("entry_low", 0)),
+        norm_price_for_dedupe(symbol, parsed.get("entry_high", 0)),
+        norm_price_for_dedupe(symbol, parsed.get("sl", 0)),
+        tp_key,
+    ]
+
+    return hashlib.sha256("|".join(parts).encode("utf-8", errors="ignore")).hexdigest()
+
+
+def remember_lifecycle(message, key, result, sent_messages):
+    parsed = result.get("parsed") or {}
+    ids = [getattr(m, "id", None) for m in sent_messages if getattr(m, "id", None)]
+
+    rec = {
+        "source_msg_id": int(message.id),
+        "topic": int(key),
+        "created_ts": time.time(),
+        "last_update_ts": time.time(),
+        "dest_ids": ids,
+        "original_dest_id": ids[0] if len(ids) > 0 else None,
+        "ai_dest_id": ids[1] if len(ids) > 1 else None,
+        "source_dest_id": ids[2] if len(ids) > 2 else None,
+        "status": "OPEN",
+        "symbol": parsed.get("symbol"),
+        "direction": parsed.get("direction"),
+        "order_type": parsed.get("order_type"),
+        "entry_low": parsed.get("entry_low"),
+        "entry_high": parsed.get("entry_high"),
+        "sl": parsed.get("sl"),
+        "tps": parsed.get("tps") or [],
+        "updates": [],
+    }
+
+    active_signal_lifecycle[lifecycle_key_for(message, key)] = rec
+    last_active_signal_by_topic[int(key)] = rec
+
+    try:
+        path = DATA_DIR / "signal_lifecycle.json"
+        path.write_text(json.dumps(active_signal_lifecycle, default=str), encoding="utf-8")
+    except Exception:
+        pass
+
+    log.info(f"[lifecycle open] topic={key} source={message.id} ai_dest={rec['ai_dest_id']}")
+
+
+def move_update_from_text(text):
+    raw = text or ""
+    t = raw.upper()
+
+    if not re.search(r"\b(MOVE|MOVED|CHANGE|CHANGED|UPDATE|UPDATED|ENTERED|ENTRY|LIMIT)\b", t):
+        return None
+
+    if re.search(r"\b(CANCEL|REMOVE|INVALID|CLOSE|CLOSED)\b", t):
+        return {"type": "CANCEL", "text": "<b>SIGNAL CANCELLED / REMOVED 💎</b>"}
+
+    m = re.search(r"\b(?:MOVE|MOVED|CHANGE|CHANGED|UPDATE|UPDATED)\s+(?:LIMIT|ENTRY|ENTRIES|LEVEL)?\s*(?:TO|AT)?\s*[:@\-]?\s*(\d+(?:\.\d+)?)\b", t)
+    if not m:
+        m = re.search(r"\b(?:ENTERED|ENTRY)\s+(?:AT|TO)?\s*[:@\-]?\s*(\d+(?:\.\d+)?)\b", t)
+
+    if not m:
+        return None
+
+    price = m.group(1)
+    return {"type": "MOVE_ENTRY", "price": price, "text": f"<b>ENTRY UPDATED TO {price} 💎</b>"}
+
+
+async def maybe_send_lifecycle_update(message, key, text):
+    # First priority: direct reply to known signal packet.
+    direct_update = format_signal_update_text(text)
+    move_update = move_update_from_text(text)
+
+    if not direct_update and not move_update:
+        return False
+
+    source_id, packet_ids = packet_for_reply_source(message, key)
+
+    rec = None
+
+    if source_id:
+        rec = active_signal_lifecycle.get(f"{SIGNAL_SOURCE_CHAT}:{key}:{source_id}")
+
+    if not rec:
+        rec = last_active_signal_by_topic.get(int(key))
+
+    if not rec:
+        return False
+
+    ai_msg_id = rec.get("ai_dest_id")
+    if not ai_msg_id:
+        return False
+
+    update_text = direct_update or move_update["text"]
+
+    sent = await client.send_message(
+        SIGNAL_DEST_CHAT,
+        update_text,
+        parse_mode="html",
+        link_preview=False,
+        reply_to=int(ai_msg_id),
+    )
+
+    rec["last_update_ts"] = time.time()
+    rec.setdefault("updates", []).append({
+        "source_msg_id": int(message.id),
+        "dest_msg_id": int(getattr(sent, "id", 0) or 0),
+        "text": update_text,
+        "ts": time.time(),
+    })
+
+    if move_update and move_update.get("type") == "CANCEL":
+        rec["status"] = "CANCELLED"
+    elif move_update and move_update.get("type") == "MOVE_ENTRY":
+        rec["status"] = "ENTRY_UPDATED"
+        try:
+            rec["entry_low"] = float(move_update["price"])
+            rec["entry_high"] = float(move_update["price"])
+        except Exception:
+            pass
+    elif direct_update:
+        if "TP" in direct_update.upper() and "HIT" in direct_update.upper():
+            rec["status"] = "TP_HIT"
+        elif "PIPS" in direct_update.upper():
+            rec["status"] = "RUNNING_PROFIT"
+
+    try:
+        path = DATA_DIR / "signal_lifecycle.json"
+        path.write_text(json.dumps(active_signal_lifecycle, default=str), encoding="utf-8")
+    except Exception:
+        pass
+
+    log.info(f"[lifecycle update sent] topic={key} source_msg={message.id} ai_msg={ai_msg_id} text={update_text}")
+    return True
+
+
 def source_name_for(message):
     topic_id = topic_id_of(message)
     return f"ExposedFX | {topic_label(topic_id)}"
@@ -472,20 +653,6 @@ def looks_like_partial_signal_piece(text: str) -> bool:
     return False
 
 
-def content_signature_for(result, key):
-    parsed = result.get("parsed") or {}
-    parts = [
-        str(key),
-        str(parsed.get("symbol", "")),
-        str(parsed.get("direction", "")),
-        f"{float(parsed.get('entry_low', 0)):.5f}",
-        f"{float(parsed.get('entry_high', 0)):.5f}",
-        f"{float(parsed.get('sl', 0)):.5f}",
-        ",".join(f"{float(x):.5f}" for x in (parsed.get("tps") or [])[:8]),
-    ]
-    return hashlib.sha256("|".join(parts).encode("utf-8", errors="ignore")).hexdigest()
-
-
 def remember_content_signature(sig):
     if sig in sent_content_signature_set:
         return False
@@ -638,8 +805,12 @@ async def on_signal_hub_message(event):
         source_name = source_name_for(message)
         log.info(f"[signal hub seen] msg={message.id} topic={topic_id_of(message)} text={text[:80]}")
 
+        if is_promo_text(text, topic_id_of(message)):
+            log.info("[signal hub skipped] promo/spam filter")
+            return
+
         # First try this message alone. Complete setups should not enter the partial buffer.
-        standalone_text = apply_same_as_above_context(key, text)
+        standalone_text = apply_provider_profile(apply_same_as_above_context(key, text), topic_id_of(message))
         result = extract_and_format(standalone_text, source_name, message.id)
         if result:
             await send_full_signal(message, result, key, text, forward_raw=True)
@@ -665,7 +836,7 @@ async def on_signal_hub_message(event):
         # Do NOT forward candidate messages yet.
         # Only forward the original after the setup is fully confirmed and formatted.
 
-        combined = apply_same_as_above_context(key, combined_text_for(key))
+        combined = apply_provider_profile(apply_same_as_above_context(key, combined_text_for(key)), topic_id_of(message))
         result = extract_and_format(combined, source_name, message.id)
         if result:
             raw_msg = first_buffer_message(key) or message
@@ -686,6 +857,7 @@ async def on_admin_message(event):
 
 
 async def main():
+    await start_runtime_guard("exposedfx-ai-signal-formatter", log)
     await client.connect()
     if not await client.is_user_authorized():
         raise RuntimeError("Telegram session loaded but account is not authorised. Regenerate session chunks.")
@@ -703,6 +875,10 @@ async def main():
     log.info(f"Content signal dedupe active: True")
     log.info(f"TP same-as-above context active: True")
     log.info(f"Signal update replies active: True")
+    log.info("Signal lifecycle tracking active: True")
+    log.info("Provider profiles active: True")
+    log.info("Promo filter active: True")
+    log.info("Tolerance dedupe active: True")
     await admin_startup(client)
     asyncio.create_task(admin_loop(client, stats))
     await client.run_until_disconnected()

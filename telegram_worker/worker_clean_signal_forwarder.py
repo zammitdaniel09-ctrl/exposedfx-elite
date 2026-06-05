@@ -328,6 +328,7 @@ async def on_deleted(event):
 
 
 async def main():
+    await start_runtime_guard("exposedfx-clean-signal-forwarder", log)
     await client.connect()
 
     if not await client.is_user_authorized():
