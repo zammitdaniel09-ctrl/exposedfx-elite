@@ -547,21 +547,15 @@ def maybe_post_signal(route, message, text):
         log.error(f"[signal post failed] {route['name']}: {exc}")
 
 
-async def copy_one(message, route, edited=False):
-    if edited:
-        await delete_existing_destination(message, route)
-
-    target_reply = reply_target(message, route)
-    text = text_of(message)
-    entities = entities_of(message)
-
-    if DRY_RUN:
-        log.info(f"[DRY_RUN copy] {route['name']}")
-        return None
-
-    if is_real_media(message):
-        log.info(f"[media copy] msg={message.id} route={route['name']} has_caption={bool(text)} reply_to={target_reply}")
-        sent = await client.send_file(
+async def send_media_exact(message, route, target_reply, text, entities):
+    """
+    Robust media copier:
+    1. Try direct Telethon media resend.
+    2. If that fails, download and re-upload.
+    This preserves photos/videos/documents + captions + caption entities.
+    """
+    try:
+        return await client.send_file(
             route["dest_chat"],
             message.media,
             caption=text if text else None,
@@ -569,10 +563,111 @@ async def copy_one(message, route, edited=False):
             parse_mode=None,
             reply_to=target_reply,
         )
+    except Exception as exc:
+        log.warning(f"[media direct copy failed] msg={message.id} route={route['name']}: {exc}")
+
+    cache_dir = DATA_DIR / "media_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    downloaded = None
+    try:
+        downloaded = await message.download_media(file=str(cache_dir / f"{route['dest_topic']}_{message.id}"))
+        if not downloaded:
+            raise RuntimeError("download_media returned no file path")
+
+        sent = await client.send_file(
+            route["dest_chat"],
+            downloaded,
+            caption=text if text else None,
+            formatting_entities=entities if text else None,
+            parse_mode=None,
+            reply_to=target_reply,
+        )
+
+        return sent
+
+    finally:
+        if downloaded:
+            try:
+                Path(downloaded).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
+async def ensure_replied_message_copied(message, route, depth=0):
+    """
+    If source message replies to another source message and that parent was not copied yet,
+    copy the parent first, then this message can reply to the correct destination message.
+    This prevents detached replies in ExposedFX topics.
+    """
+    if depth > 2:
+        return False
+
+    for source_msg_id in reply_source_ids(message):
+        try:
+            source_msg_id = int(source_msg_id)
+        except Exception:
+            continue
+
+        if route.get("source_topic") is not None and source_msg_id == int(route["source_topic"]):
+            continue
+
+        key = map_key(route["source_chat"], source_msg_id, route["dest_chat"], route["dest_topic"])
+        if message_map.get(key):
+            return True
+
+        try:
+            parent = await client.get_messages(route["source_chat"], ids=source_msg_id)
+            if not parent:
+                continue
+
+            await copy_one(parent, route, edited=False, ensure_reply=False)
+            log.info(
+                f"[reply parent copied] route={route['name']} "
+                f"parent_source={source_msg_id} -> dest={route['dest_chat']}_{route['dest_topic']}"
+            )
+            return True
+
+        except Exception as exc:
+            log.warning(
+                f"[reply parent copy failed] route={route['name']} "
+                f"parent_source={source_msg_id}: {exc}"
+            )
+
+    return False
+
+
+async def copy_one(message, route, edited=False, ensure_reply=True):
+    if edited:
+        await delete_existing_destination(message, route)
+
+    text = text_of(message)
+    entities = entities_of(message)
+
+    if ensure_reply:
+        await ensure_replied_message_copied(message, route)
+
+    target_reply = reply_target(message, route)
+
+    if DRY_RUN:
+        log.info(f"[DRY_RUN copy] {route['name']}")
+        return None
+
+    if is_real_media(message):
+        log.info(
+            f"[media copy] msg={message.id} route={route['name']} "
+            f"has_caption={bool(text)} reply_to={target_reply}"
+        )
+        sent = await send_media_exact(message, route, target_reply, text, entities)
+
     else:
+        if not text:
+            log.info(f"[skip empty unsupported] route={route['name']} msg={message.id}")
+            return None
+
         sent = await client.send_message(
             route["dest_chat"],
-            text if text else "Unsupported message type.",
+            text,
             formatting_entities=entities if text else None,
             parse_mode=None,
             reply_to=target_reply,
@@ -585,6 +680,7 @@ async def copy_one(message, route, edited=False):
 
 async def copy_album(messages, route):
     first = messages[0]
+    await ensure_replied_message_copied(first, route)
     target_reply = reply_target(first, route)
     files = []
     caption = None
@@ -739,6 +835,7 @@ async def main():
     log.info(f"BLOCKED_SENDER_IDS={sorted(BLOCKED_SENDER_IDS)}")
     log.info(f"PROCESS_GROUPED_MESSAGES_IN_NEW_HANDLER={PROCESS_GROUPED_MESSAGES_IN_NEW_HANDLER}")
     log.info(f"ENABLE_ALBUM_HANDLER={ENABLE_ALBUM_HANDLER}")
+    log.info("Exact media/reply copy hardening active: True")
     log.info("Imperium fixed Telegram worker running...")
     asyncio.create_task(stats.loop(client))
     log.info("Weekly stats reporter running for Sunday 00:00 Europe/Malta")
