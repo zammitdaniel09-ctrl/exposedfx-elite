@@ -718,6 +718,48 @@ def extract_tps_contextual(text: str, symbol: str, direction: str, entry_mid: fl
 
 
 
+
+def order_type_from_text(text: str, direction: str) -> str:
+    """
+    Detect breakout pending orders.
+
+    SELL STOP:
+    - sells below 4458
+    - sell below 4458
+    - sell stop 4458
+    - break below 4458
+
+    BUY STOP:
+    - buys above 4458
+    - buy above 4458
+    - buy stop 4458
+    - break above 4458
+    """
+    t = clean(text).upper()
+
+    if direction == "SELL":
+        if re.search(r"\b(SELL|SELLS|SHORT|SHORTS)\s+BELOW\b", t):
+            return "SELL_STOP"
+        if re.search(r"\bSELL\s+STOP\b", t):
+            return "SELL_STOP"
+        if re.search(r"\bBREAK\s+BELOW\b", t):
+            return "SELL_STOP"
+
+    if direction == "BUY":
+        if re.search(r"\b(BUY|BUYS|LONG|LONGS)\s+ABOVE\b", t):
+            return "BUY_STOP"
+        if re.search(r"\bBUY\s+STOP\b", t):
+            return "BUY_STOP"
+        if re.search(r"\bBREAK\s+ABOVE\b", t):
+            return "BUY_STOP"
+
+    if re.search(r"\b(BUY|SELL)\s+LIMIT\b", t):
+        return "LIMIT"
+
+    return "MARKET_OR_ZONE"
+
+
+
 def regex_extract(text: str) -> Optional[Dict[str, Any]]:
     raw = clean(text)
 
@@ -761,6 +803,7 @@ def regex_extract(text: str) -> Optional[Dict[str, Any]]:
         "is_signal": True,
         "symbol": symbol,
         "direction": direction,
+        "order_type": order_type_from_text(raw, direction),
         "entry_low": float(entry[0]),
         "entry_high": float(entry[1]),
         "sl": float(sl),
@@ -862,7 +905,7 @@ def claude_extract(text: str) -> Optional[Dict[str, Any]]:
         "Use latest/current stop loss if several are shown. "
         "For TP open with no numbers, return tps=[] and tp_open=true. "
         "Do not decide risk unless the text explicitly says low risk, medium risk, high risk, higher risk, risky, or very high. Otherwise leave risk empty so the system calculates risk dynamically by pair. "
-        "Return: is_signal, symbol, direction, entry_low, entry_high, sl, tps, tp_open, risk."
+        "Return: is_signal, symbol, direction, order_type, entry_low, entry_high, sl, tps, tp_open, risk. order_type must be SELL_STOP for sells below/sell stop/break below, BUY_STOP for buys above/buy stop/break above, LIMIT for buy limit/sell limit, otherwise MARKET_OR_ZONE."
     )
 
     models = []
@@ -946,6 +989,7 @@ def claude_extract(text: str) -> Optional[Dict[str, Any]]:
                 "is_signal": True,
                 "symbol": symbol,
                 "direction": direction,
+                "order_type": str(obj.get("order_type") or order_type_from_text(text, direction)).upper(),
                 "entry_low": min(entry_low, entry_high),
                 "entry_high": max(entry_low, entry_high),
                 "sl": sl,

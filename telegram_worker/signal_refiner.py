@@ -303,6 +303,7 @@ def claude_parse(text: str) -> Optional[Dict[str, Any]]:
 
 def build_message(sig: Dict[str, Any]) -> str:
     direction = sig["direction"].upper()
+    order_type = str(sig.get("order_type") or "MARKET_OR_ZONE").upper()
     symbol_raw = sig.get("symbol", "XAUUSD").upper()
     symbol = esc(display_symbol(symbol_raw))
     lo = float(sig["entry_low"])
@@ -310,20 +311,50 @@ def build_message(sig: Dict[str, Any]) -> str:
     sl = float(sig["sl"])
     tps = [float(x) for x in sig.get("tps", [])][:8]
     risk = str(sig.get("risk") or "").upper()
+
     if risk not in ("LOW", "MEDIUM", "HIGH"):
         risk = auto_risk(symbol_raw, direction, lo, hi, sl)
+
     layer = float(sig.get("layer_point") or estimated_layer(direction, lo, hi, sl))
 
-    if direction == "BUY":
+    extra_tips = []
+
+    if order_type == "SELL_STOP":
+        trigger = lo
+        heading = f"{ce('RED_ALERT')}<b>SELL STOP {symbol} BREAKOUT ZONE</b>"
+        entry_lines = [
+            f"• Trigger Below : {esc(price(trigger))}",
+            f"• Sell Stop Entry : {esc(price(trigger))}",
+        ]
+        extra_tips = [
+            f"Only enter if price breaks below {esc(price(trigger))} {ce('EXCLAMATION_RED')}",
+            f"Do not enter early before confirmation {ce('EXCLAMATION_RED')}",
+        ]
+
+    elif order_type == "BUY_STOP":
+        trigger = hi
+        heading = f"{ce('UPTREND_CHART')}<b>BUY STOP {symbol} BREAKOUT ZONE</b>"
+        entry_lines = [
+            f"• Trigger Above : {esc(price(trigger))}",
+            f"• Buy Stop Entry : {esc(price(trigger))}",
+        ]
+        extra_tips = [
+            f"Only enter if price breaks above {esc(price(trigger))} {ce('EXCLAMATION_RED')}",
+            f"Do not enter early before confirmation {ce('EXCLAMATION_RED')}",
+        ]
+
+    elif direction == "BUY":
         heading = f"{ce('UPTREND_CHART')}<b>BUY {symbol} INTRADAY ZONE</b>"
         entry_lines = [f"• Buy Point : {esc(price(hi))}"]
         entry_lines.append(f"• Layer Point : {esc(price(layer))}")
+
     else:
         heading = f"{ce('RED_ALERT')}<b>SELL {symbol} ZONE</b>"
         entry_lines = [f"• Sell Point : {esc(price(lo))}"]
         entry_lines.append(f"• Layer Point : {esc(price(layer))}")
 
     lines = [heading, "", *entry_lines, f"• Stop Loss : {esc(price(sl))}", ""]
+
     for idx, tp in enumerate(tps, 1):
         lines.append(f"{ce('PIN_SIGNALS')}TP{idx} - {esc(price(tp))}")
 
@@ -337,11 +368,13 @@ def build_message(sig: Dict[str, Any]) -> str:
         f"{risk_icon(risk)} RISK: {risk}",
         "",
         "TIPS:",
+        *extra_tips,
         f"Breakeven after TP1 HIT {ce('EXCLAMATION_RED')}",
         f"Use correct Risk management {ce('EXCLAMATION_RED')}",
         f"Take spread into consideration when placing SL{ce('EXCLAMATION_RED')}",
         f"THIS IS NOT FINANCIAL ADVICE {ce('CAUTION_RED')}",
     ]
+
     return "\n".join(lines)
 
 
