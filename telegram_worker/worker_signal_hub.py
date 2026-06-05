@@ -169,6 +169,125 @@ def should_skip(message):
     return False
 
 
+
+def reply_source_ids_for_update(message):
+    ids = []
+
+    direct = getattr(message, "reply_to_msg_id", None)
+    if direct:
+        ids.append(direct)
+
+    reply = getattr(message, "reply_to", None)
+    if reply:
+        for attr in ("reply_to_msg_id", "reply_to_top_id", "top_msg_id"):
+            value = getattr(reply, attr, None)
+            if value and value not in ids:
+                ids.append(value)
+
+    out = []
+    for x in ids:
+        try:
+            out.append(int(x))
+        except Exception:
+            pass
+    return out
+
+
+def packet_for_reply_source(message, key):
+    for source_id in reply_source_ids_for_update(message):
+        pkey = f"{SIGNAL_SOURCE_CHAT}:{key}:{source_id}"
+        ids = signal_packet_map.get(pkey) or []
+        if len(ids) >= 2:
+            return source_id, [int(x) for x in ids]
+    return None, []
+
+
+def format_signal_update_text(text):
+    raw = (text or "").strip()
+    if not raw:
+        return None
+
+    t = raw.upper()
+
+    # Avoid new setups or recaps.
+    has_new_setup = bool(re.search(r"\b(BUY|SELL|LONG|SHORT)\b", t)) and bool(re.search(r"\b(SL|STOP|STOPLOSS|STOP\s*LOSS)\b\s*[:\-]?\s*\d", t))
+    if has_new_setup:
+        return None
+
+    blocked = [
+        "ENDED WITH",
+        "DAILY RECAP",
+        "WEEKLY RECAP",
+        "RESULTS",
+        "OVER ",
+        "TOTAL",
+        "TODAY",
+        "ALL TRADES",
+        "CLIENT",
+        "VIP",
+        "INSTAGRAM",
+    ]
+    if any(x in t for x in blocked):
+        return None
+
+    pip_matches = re.findall(r"([+-]?\s*\d{1,5}(?:\.\d+)?)\s*(?:PIP|PIPS)\b", t)
+    pip_values = [p.replace(" ", "").replace("+", "") for p in pip_matches]
+
+    # Avoid R1/R2 multi-line recaps.
+    if len(pip_values) > 1:
+        return None
+
+    tp_nums = []
+    if re.search(r"\b(HIT|DONE|SLAP+ED|SMASHED|CLEANED)\b", t):
+        tp_nums = re.findall(r"\bTP\s*#?\s*(\d{1,2})\b", t)
+
+    # If it only says "100 pips" as a direct reply to known signal, allow it.
+    pip_part = None
+    if pip_values:
+        value = pip_values[0]
+        pip_part = f"+{value}PIPS"
+
+    tp_part = None
+    if tp_nums:
+        unique = []
+        for n in tp_nums:
+            if n not in unique:
+                unique.append(n)
+        tp_part = " ".join(f"TP{n}" for n in unique) + " HIT"
+
+    if not pip_part and not tp_part:
+        return None
+
+    if tp_part and pip_part:
+        return f"<b>{tp_part} {pip_part} 💎</b>"
+    if tp_part:
+        return f"<b>{tp_part} 💎</b>"
+    return f"<b>{pip_part} 💎</b>"
+
+
+async def maybe_send_signal_update_reply(message, key, text):
+    update_text = format_signal_update_text(text)
+    if not update_text:
+        return False
+
+    source_id, packet_ids = packet_for_reply_source(message, key)
+    if not packet_ids:
+        return False
+
+    ai_msg_id = packet_ids[1]
+
+    sent = await client.send_message(
+        SIGNAL_DEST_CHAT,
+        update_text,
+        parse_mode="html",
+        link_preview=False,
+        reply_to=ai_msg_id,
+    )
+
+    log.info(f"[signal update sent] source_reply={message.id} replied_source={source_id} ai_msg={ai_msg_id} update_msg={getattr(sent, 'id', None)} text={update_text}")
+    return True
+
+
 def source_name_for(message):
     topic_id = topic_id_of(message)
     return f"ExposedFX | {topic_label(topic_id)}"
@@ -583,6 +702,7 @@ async def main():
     log.info(f"Partial signal buffer: {PARTIAL_BUFFER_ENABLED} | window={BUFFER_WINDOW_SECONDS}s | max={BUFFER_MAX_MESSAGES}")
     log.info(f"Content signal dedupe active: True")
     log.info(f"TP same-as-above context active: True")
+    log.info(f"Signal update replies active: True")
     await admin_startup(client)
     asyncio.create_task(admin_loop(client, stats))
     await client.run_until_disconnected()

@@ -1,14 +1,20 @@
 import json
 import os
 import re
+import time
 from typing import Any, Dict, Optional
+from pathlib import Path
 
 import requests
 
 from telegram_worker.signal_refiner import build_message, source_line
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-3-haiku-20240307").strip()
+ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001").strip()
+ANTHROPIC_FAST_MODEL = os.environ.get("ANTHROPIC_FAST_MODEL", ANTHROPIC_MODEL or "claude-haiku-4-5-20251001").strip()
+ANTHROPIC_STRONG_MODEL = os.environ.get("ANTHROPIC_STRONG_MODEL", "claude-sonnet-4-6").strip()
+CLAUDE_DAILY_BUDGET_USD = float(os.environ.get("CLAUDE_DAILY_BUDGET_USD", "8").strip() or "8")
+CLAUDE_USAGE_FILE = Path(os.environ.get("DATA_DIR") or "./data") / "claude_usage.json"
 USE_CLAUDE = os.environ.get("USE_CLAUDE_SIGNAL_AI", "1").strip() == "1"
 AUTO_TP_IF_MISSING = os.environ.get("AUTO_TP_IF_MISSING", "1").strip() == "1"
 
@@ -778,90 +784,181 @@ def parse_jsonish(value: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+
+CLAUDE_PRICE_PER_MTOK = {
+    "claude-haiku-4-5-20251001": (1.0, 5.0),
+    "claude-haiku-4-5": (1.0, 5.0),
+    "claude-sonnet-4-6": (3.0, 15.0),
+}
+
+
+def _today_key():
+    return time.strftime("%Y-%m-%d", time.gmtime())
+
+
+def _load_claude_usage():
+    try:
+        if CLAUDE_USAGE_FILE.exists():
+            return json.loads(CLAUDE_USAGE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+
+def _save_claude_usage(data):
+    try:
+        CLAUDE_USAGE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = CLAUDE_USAGE_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        tmp.replace(CLAUDE_USAGE_FILE)
+    except Exception:
+        pass
+
+
+def _model_price(model):
+    return CLAUDE_PRICE_PER_MTOK.get(model, CLAUDE_PRICE_PER_MTOK.get(model.replace("-20251001", ""), (3.0, 15.0)))
+
+
+def _record_claude_usage(model, input_tokens, output_tokens):
+    data = _load_claude_usage()
+    day = _today_key()
+    rec = data.get(day, {"usd": 0.0, "calls": 0, "input_tokens": 0, "output_tokens": 0})
+
+    in_price, out_price = _model_price(model)
+    cost = (float(input_tokens or 0) / 1_000_000.0) * in_price + (float(output_tokens or 0) / 1_000_000.0) * out_price
+
+    rec["usd"] = float(rec.get("usd", 0.0)) + cost
+    rec["calls"] = int(rec.get("calls", 0)) + 1
+    rec["input_tokens"] = int(rec.get("input_tokens", 0)) + int(input_tokens or 0)
+    rec["output_tokens"] = int(rec.get("output_tokens", 0)) + int(output_tokens or 0)
+    data[day] = rec
+
+    _save_claude_usage(data)
+    return rec["usd"]
+
+
+def _claude_budget_remaining():
+    data = _load_claude_usage()
+    used = float((data.get(_today_key()) or {}).get("usd", 0.0))
+    return CLAUDE_DAILY_BUDGET_USD - used
+
+
 def claude_extract(text: str) -> Optional[Dict[str, Any]]:
     if not has_strict_new_signal_requirements(text):
         return None
     if not (USE_CLAUDE and ANTHROPIC_API_KEY):
         return None
+    if _claude_budget_remaining() <= 0:
+        return None
 
     system = (
         "Extract an actionable trading signal from messy Telegram text. Return JSON only. "
         "Accept any market: forex, metals, crypto, indices. "
-        "A complete signal needs direction, entry, and stop loss. If no TP is provided, treat it as TP open so targets can be estimated. If stop loss is written as pip distance, keep the numeric pip distance and the system will convert it. For XAUUSD/GOLD, 10 pips equals 1 dollar, so 40 pips equals 4 dollars. Expand shorthand ranges such as 4498-96 as 4498 to 4496, not 4498 to 96. Do not use SL or TP prices as entry when entry is missing. "
+        "A complete signal needs direction, entry, and stop loss. If no TP is provided, treat it as TP open so targets can be estimated. "
+        "If stop loss or take profit is written as pip distance, keep the numeric pip distance and the system will convert it. "
+        "For XAUUSD/GOLD, 10 pips equals 1 dollar, so 40 pips equals 4 dollars and 100 pips equals 10 dollars. "
+        "Expand shorthand ranges such as 4498-96 as 4498 to 4496, not 4498 to 96. "
+        "Do not use SL or TP prices as entry when entry is missing. Ignore R1/R2 labels as entries. "
         "Use latest/current stop loss if several are shown. "
         "For TP open with no numbers, return tps=[] and tp_open=true. "
         "Do not decide risk unless the text explicitly says low risk, medium risk, high risk, higher risk, risky, or very high. Otherwise leave risk empty so the system calculates risk dynamically by pair. "
         "Return: is_signal, symbol, direction, entry_low, entry_high, sl, tps, tp_open, risk."
     )
-    try:
-        res = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            json={
-                "model": ANTHROPIC_MODEL,
-                "max_tokens": 600,
-                "temperature": 0,
-                "system": system,
-                "messages": [{"role": "user", "content": clean(text)[:4500]}],
-            },
-            timeout=20,
-        )
-        if res.status_code >= 400:
-            return None
-        data = res.json()
-        content = "".join(part.get("text", "") for part in data.get("content", []) if part.get("type") == "text")
-        obj = parse_jsonish(content)
-        if not obj or not obj.get("is_signal"):
-            return None
-        direction = str(obj.get("direction", "")).upper()
-        if direction not in ("BUY", "SELL"):
-            return None
-        entry_low = float(obj["entry_low"])
-        entry_high = float(obj.get("entry_high", entry_low))
-        sl = float(obj["sl"])
-        symbol = normalize_symbol(str(obj.get("symbol", "")), text)
-        tps = []
-        for item in obj.get("tps", []) or []:
-            try:
-                tps.append(float(item))
-            except Exception:
-                pass
-        regex_tps, regex_open = extract_tps(text)
-        if regex_tps:
-            tps = regex_tps
-        tp_open = bool(obj.get("tp_open", False)) or regex_open or "OPEN" in clean(text).upper()
-        if not tps and not tp_open:
-            if AUTO_TP_IF_MISSING:
-                tp_open = True
-            else:
-                return None
-        mid = (entry_low + entry_high) / 2
-        sl = convert_distance_sl_if_needed(symbol, direction, mid, sl, text)
-        tps = [tp for tp in tps if not invalid_tp_for_direction(direction, mid, float(tp))]
-        explicit_risk = str(obj.get("risk", "")).upper()
-        if explicit_risk in ("LOW", "MEDIUM", "HIGH") and any(x in clean(text).upper() for x in ("LOW RISK", "MEDIUM RISK", "HIGH RISK", "HIGHER RISK", "VERY HIGH", "RISKY")):
-            risk = explicit_risk
-        else:
-            risk = risk_from_text(text, symbol, mid, sl)
-        return {
-            "is_signal": True,
-            "symbol": symbol,
-            "direction": direction,
-            "entry_low": min(entry_low, entry_high),
-            "entry_high": max(entry_low, entry_high),
-            "sl": sl,
-            "tps": estimate_tps(symbol, direction, mid, sl, tps, tp_open),
-            "tp_open": True,
-            "risk": risk,
-            "layer_point": estimate_layer(direction, min(entry_low, entry_high), max(entry_low, entry_high), sl),
-        }
-    except Exception:
-        return None
 
+    models = []
+    for model in [ANTHROPIC_FAST_MODEL, ANTHROPIC_STRONG_MODEL]:
+        if model and model not in models:
+            models.append(model)
+
+    for model in models:
+        if _claude_budget_remaining() <= 0:
+            return None
+
+        try:
+            res = requests.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": ANTHROPIC_API_KEY,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "max_tokens": 600,
+                    "temperature": 0,
+                    "system": system,
+                    "messages": [{"role": "user", "content": clean(text)[:4500]}],
+                },
+                timeout=20,
+            )
+
+            if res.status_code >= 400:
+                continue
+
+            data = res.json()
+            usage = data.get("usage") or {}
+            _record_claude_usage(model, usage.get("input_tokens", 0), usage.get("output_tokens", 0))
+
+            content = "".join(part.get("text", "") for part in data.get("content", []) if part.get("type") == "text")
+            obj = parse_jsonish(content)
+            if not obj or not obj.get("is_signal"):
+                continue
+
+            direction = str(obj.get("direction", "")).upper()
+            if direction not in ("BUY", "SELL"):
+                continue
+
+            entry_low = float(obj["entry_low"])
+            entry_high = float(obj.get("entry_high", entry_low))
+            sl = float(obj["sl"])
+            symbol = normalize_symbol(str(obj.get("symbol", "")), text)
+
+            tps = []
+            for item in obj.get("tps", []) or []:
+                try:
+                    tps.append(float(item))
+                except Exception:
+                    pass
+
+            regex_tps, regex_open = extract_tps_contextual(text, symbol, direction, (entry_low + entry_high) / 2)
+            if regex_tps:
+                tps = regex_tps
+
+            tp_open = bool(obj.get("tp_open", False)) or regex_open or "OPEN" in clean(text).upper()
+
+            if not tps and not tp_open:
+                if AUTO_TP_IF_MISSING:
+                    tp_open = True
+                else:
+                    continue
+
+            mid = (entry_low + entry_high) / 2
+            sl = convert_distance_sl_if_needed(symbol, direction, mid, sl, text)
+            tps = [tp for tp in tps if not invalid_tp_for_direction(direction, mid, float(tp))]
+
+            explicit_risk = str(obj.get("risk", "")).upper()
+            if explicit_risk in ("LOW", "MEDIUM", "HIGH") and any(x in clean(text).upper() for x in ("LOW RISK", "MEDIUM RISK", "HIGH RISK", "HIGHER RISK", "VERY HIGH", "RISKY")):
+                risk = explicit_risk
+            else:
+                risk = risk_from_text(text, symbol, mid, sl)
+
+            return {
+                "is_signal": True,
+                "symbol": symbol,
+                "direction": direction,
+                "entry_low": min(entry_low, entry_high),
+                "entry_high": max(entry_low, entry_high),
+                "sl": sl,
+                "tps": estimate_tps(symbol, direction, mid, sl, tps, tp_open),
+                "tp_open": True,
+                "risk": risk,
+                "layer_point": estimate_layer(direction, min(entry_low, entry_high), max(entry_low, entry_high), sl),
+            }
+
+        except Exception:
+            continue
+
+    return None
 
 def extract_and_format(text: str, source_name: str = "ExposedFX", message_id=None) -> Optional[Dict[str, Any]]:
     if not has_strict_new_signal_requirements(text):

@@ -56,6 +56,14 @@ BLOCKED_DEST_TOPICS = {
     if x.strip()
 }
 
+
+BLOCKED_SENDER_IDS_RAW = os.environ.get("BLOCKED_SENDER_IDS", "7556281143").strip()
+BLOCKED_SENDER_IDS = {
+    int(x)
+    for x in re.split(r"[,\s]+", BLOCKED_SENDER_IDS_RAW)
+    if x.strip()
+}
+
 SOURCE_CHATS = sorted(set(r["source_chat"] for r in ROUTES))
 POSTED_SIGNAL_KEYS = set()
 stats = WeeklyStats(DATA_DIR)
@@ -246,6 +254,46 @@ def text_of(message):
 def entities_of(message):
     return getattr(message, "entities", None) or []
 
+
+
+
+def sender_ids_for_message(message):
+    ids = set()
+
+    for attr in ("sender_id", "from_id"):
+        obj = getattr(message, attr, None)
+        if isinstance(obj, int):
+            ids.add(int(obj))
+        else:
+            for sub in ("user_id", "channel_id", "chat_id"):
+                val = getattr(obj, sub, None)
+                if val:
+                    try:
+                        ids.add(int(val))
+                    except Exception:
+                        pass
+
+    fwd = getattr(message, "fwd_from", None)
+    if fwd:
+        for attr in ("from_id", "saved_from_peer"):
+            obj = getattr(fwd, attr, None)
+            if isinstance(obj, int):
+                ids.add(int(obj))
+            else:
+                for sub in ("user_id", "channel_id", "chat_id"):
+                    val = getattr(obj, sub, None)
+                    if val:
+                        try:
+                            ids.add(int(val))
+                        except Exception:
+                            pass
+
+    return ids
+
+
+def is_blocked_sender(message):
+    ids = sender_ids_for_message(message)
+    return bool(ids & BLOCKED_SENDER_IDS)
 
 
 def known_source_topics_for_chat(chat_id):
@@ -576,12 +624,16 @@ async def copy_album(messages, route):
 
 async def handle_single_message(event, edited=False):
     message = event.message
+
+    if is_blocked_sender(message):
+        log.warning(f"[blocked sender] ids={sorted(sender_ids_for_message(message))} msg={getattr(message, 'id', None)}")
+        return
     if getattr(message, "grouped_id", None) and not PROCESS_GROUPED_MESSAGES_IN_NEW_HANDLER:
         return
 
     chat_id = event.chat_id
     topic_id = topic_of(message, chat_id)
-    routes = routes_for(chat_id, topic_id, message)
+    routes = routes_for(chat_id, topic_id, first)
     if not routes:
         log.info(f"[no route] source={chat_id}_{topic_id} msg={getattr(message, 'id', None)} text={text_of(message)[:80]!r}")
         return
@@ -632,9 +684,15 @@ async def on_album(event):
         return
 
     first = event.messages[0]
+
+    if any(is_blocked_sender(m) for m in event.messages):
+        ids = sorted(set().union(*(sender_ids_for_message(m) for m in event.messages)))
+        log.warning(f"[blocked sender album] ids={ids} first_msg={getattr(first, 'id', None)}")
+        return
+
     chat_id = event.chat_id
     topic_id = topic_of(first, chat_id)
-    routes = routes_for(chat_id, topic_id, message)
+    routes = routes_for(chat_id, topic_id, first)
     if not routes:
         return
 
@@ -678,6 +736,7 @@ async def main():
     log.info(f"DEDUP_WINDOW_SECONDS={DEDUP_WINDOW_SECONDS}")
     log.info(f"CROSS_SOURCE_DEDUP_DEST_TOPICS={sorted(CROSS_SOURCE_DEDUP_DEST_TOPICS)}")
     log.info(f"BLOCKED_DEST_CHAT={BLOCKED_DEST_CHAT} BLOCKED_DEST_TOPICS={sorted(BLOCKED_DEST_TOPICS)}")
+    log.info(f"BLOCKED_SENDER_IDS={sorted(BLOCKED_SENDER_IDS)}")
     log.info(f"PROCESS_GROUPED_MESSAGES_IN_NEW_HANDLER={PROCESS_GROUPED_MESSAGES_IN_NEW_HANDLER}")
     log.info(f"ENABLE_ALBUM_HANDLER={ENABLE_ALBUM_HANDLER}")
     log.info("Imperium fixed Telegram worker running...")

@@ -211,10 +211,74 @@ def is_my_formatted_signal(text: str) -> bool:
     return all(re.search(pattern, t, re.IGNORECASE) for pattern in required)
 
 
+
+def is_clean_signal_update(text: str) -> bool:
+    t = (text or "").strip()
+    u = t.upper()
+
+    if not t:
+        return False
+
+    if "💎" not in t:
+        return False
+
+    if "SOURCE:" in u or "EXPOSEDFX |" in u:
+        return False
+
+    has_pips = bool(re.search(r"\+\s*\d{1,5}(?:\.\d+)?\s*PIPS\b", u))
+    has_tp_hit = bool(re.search(r"\bTP\s*#?\s*\d{1,2}\s+HIT\b", u))
+
+    return has_pips or has_tp_hit
+
+
+def clean_reply_target(message):
+    ids = []
+
+    direct = getattr(message, "reply_to_msg_id", None)
+    if direct:
+        ids.append(direct)
+
+    reply = getattr(message, "reply_to", None)
+    if reply:
+        for attr in ("reply_to_msg_id", "reply_to_top_id", "top_msg_id"):
+            value = getattr(reply, attr, None)
+            if value and value not in ids:
+                ids.append(value)
+
+    for source_id in ids:
+        key = map_key(source_id)
+        mapped = clean_message_map.get(key)
+        if mapped:
+            try:
+                return int(mapped)
+            except Exception:
+                pass
+
+    return None
+
+
 @client.on(events.NewMessage(chats=SOURCE_CHAT))
 async def on_message(event):
     message = event.message
     text = text_of(message)
+
+    if is_clean_signal_update(text):
+        reply_to = clean_reply_target(message)
+        if not reply_to:
+            log.info(f"[SKIP UPDATE NO MAP] msg={message.id} text={text[:80]!r}")
+            return
+
+        sent = await client.send_message(
+            DEST_CHAT,
+            text,
+            formatting_entities=getattr(message, "entities", None),
+            parse_mode=None,
+            link_preview=False,
+            reply_to=reply_to,
+        )
+        remember_clean_copy(message, sent)
+        log.info(f"[COPIED SIGNAL UPDATE] msg={message.id} -> {DEST_CHAT} reply_to={reply_to}")
+        return
 
     if not is_my_formatted_signal(text):
         log.info(f"[SKIP] msg={message.id} text={text[:80]!r}")
@@ -274,6 +338,7 @@ async def main():
     log.info(f"Source={SOURCE_CHAT} Destination={DEST_CHAT} CopyMode={COPY_MODE}")
     log.info("Clean formatted signal forwarder running...")
     log.info("Delete sync from incoming group to final group: True")
+    log.info("Clean signal update mirror active: True")
     await client.run_until_disconnected()
 
 
