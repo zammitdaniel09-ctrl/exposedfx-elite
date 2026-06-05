@@ -1,3 +1,4 @@
+from telegram_worker.runtime_guard import start_runtime_guard, alert_crash
 import asyncio
 import base64
 import json
