@@ -17,7 +17,6 @@ ROUTES = [{'name': 'Triad FX', 'source_chat': -1002817163788, 'source_topic': 89
  {'name': 'SOL Gibbs', 'source_chat': -1002385852838, 'source_topic': 35671, 'dest_chat': -1003918958200, 'dest_topic': 12},
  {'name': 'Sniper Pro Academy', 'source_chat': -1002385852838, 'source_topic': 65675, 'dest_chat': -1003918958200, 'dest_topic': 13},
  {'name': 'Olly Matthews', 'source_chat': -1002385852838, 'source_topic': 44752, 'dest_chat': -1003918958200, 'dest_topic': 15},
- {'name': 'LIFETIME VIP', 'source_chat': -1003902184158, 'source_topic': None, 'dest_chat': -1003918958200, 'dest_topic': 18},
  {'name': '1% VIP SIGNALS', 'source_chat': -1003903223523, 'source_topic': None, 'dest_chat': -1003918958200, 'dest_topic': 17},
  {'name': 'Premium I Live Trade', 'source_chat': -1003814307529, 'source_topic': None, 'dest_chat': -1003918958200, 'dest_topic': 25},
  {'name': 'Market Slayers VIP', 'source_chat': -1003838973021, 'source_topic': None, 'dest_chat': -1003918958200, 'dest_topic': 23},
@@ -77,7 +76,8 @@ ROUTES = [{'name': 'Triad FX', 'source_chat': -1002817163788, 'source_topic': 89
  {'name': 'Route568 449', 'source_chat': -1003788774930, 'source_topic': 449, 'dest_chat': -1003918958200, 'dest_topic': 568},
  {'name': 'Route568 445', 'source_chat': -1003788774930, 'source_topic': 445, 'dest_chat': -1003918958200, 'dest_topic': 568},
  {'name': 'Route568 443', 'source_chat': -1003788774930, 'source_topic': 443, 'dest_chat': -1003918958200, 'dest_topic': 568},
- {'name': 'Route1927 ONLY SOURCE', 'source_chat': -1003803259179, 'source_topic': None, 'dest_chat': -1003918958200, 'dest_topic': 1927}]
+ {'name': 'Route1927 ONLY SOURCE', 'source_chat': -1003803259179, 'source_topic': None, 'dest_chat': -1003918958200, 'dest_topic': 1927},
+ {'name': 'Route8587 3902184158', 'source_chat': -1003902184158, 'source_topic': None, 'dest_chat': -1003918958200, 'dest_topic': 8587}]
 
 if os.environ.get("DISABLE_PROVIDER_ROUTES", "0").strip() == "1":
     ROUTES = []
