@@ -727,7 +727,7 @@ async def handle_single_message(event, edited=False):
         log.warning(f"[blocked sender] ids={sorted(sender_ids_for_message(message))} msg={getattr(message, 'id', None)}")
         return
 
-    if is_promo_text(text_of(message), topic_id_of(message)):
+    if is_promo_text(text_of(message), topic_of(message)):
         log.info(f"[promo blocked incoming] msg={getattr(message, 'id', None)}")
         return
     if getattr(message, "grouped_id", None) and not PROCESS_GROUPED_MESSAGES_IN_NEW_HANDLER:
