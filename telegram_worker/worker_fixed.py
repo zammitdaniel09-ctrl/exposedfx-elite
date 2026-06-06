@@ -37,6 +37,8 @@ ENABLE_ALBUM_HANDLER = os.environ.get("ENABLE_ALBUM_HANDLER", "0").strip() == "1
 ENABLE_ROUTE_FALLBACK_ALL_MESSAGES = os.environ.get("ENABLE_ROUTE_FALLBACK_ALL_MESSAGES", "1").strip() == "1"
 ENABLE_ALBUM_REUPLOAD_FALLBACK = os.environ.get("ENABLE_ALBUM_REUPLOAD_FALLBACK", "1").strip() == "1"
 NO_ROUTE_TEXT_LIMIT = int(os.environ.get("NO_ROUTE_TEXT_LIMIT", "180"))
+COPY_RETRY_ATTEMPTS = int(os.environ.get("COPY_RETRY_ATTEMPTS", "2"))
+COPY_RETRY_SLEEP_CAP_SECONDS = int(os.environ.get("COPY_RETRY_SLEEP_CAP_SECONDS", "120"))
 
 DATA_DIR = Path(os.environ.get("DATA_DIR") or "./data")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -776,6 +778,88 @@ async def copy_album(messages, route):
     return sent
 
 
+def is_transient_copy_error(exc):
+    text = str(exc).lower()
+    patterns = (
+        "timeout",
+        "timed out",
+        "connection",
+        "server disconnected",
+        "temporarily",
+        "transport",
+        "network",
+        "request failed",
+    )
+    return any(p in text for p in patterns)
+
+
+async def copy_one_with_retry(message, route, edited=False):
+    attempts = max(1, COPY_RETRY_ATTEMPTS)
+    last_exc = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            return await copy_one(message, route, edited=edited)
+        except FloodWaitError as exc:
+            last_exc = exc
+            wait = min(int(exc.seconds) + 1, COPY_RETRY_SLEEP_CAP_SECONDS)
+            log.warning(
+                f"[copy retry floodwait] attempt={attempt}/{attempts} wait={wait}s "
+                f"route={route['name']} msg={getattr(message, 'id', None)}"
+            )
+            await asyncio.sleep(wait)
+        except Exception as exc:
+            last_exc = exc
+            if attempt < attempts and is_transient_copy_error(exc):
+                wait = min(2 * attempt, COPY_RETRY_SLEEP_CAP_SECONDS)
+                log.warning(
+                    f"[copy retry transient] attempt={attempt}/{attempts} wait={wait}s "
+                    f"route={route['name']} msg={getattr(message, 'id', None)} error={exc}"
+                )
+                await asyncio.sleep(wait)
+                continue
+            raise
+
+    if last_exc:
+        raise last_exc
+
+    return None
+
+
+async def copy_album_with_retry(messages, route):
+    attempts = max(1, COPY_RETRY_ATTEMPTS)
+    first = messages[0] if messages else None
+    last_exc = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            return await copy_album(messages, route)
+        except FloodWaitError as exc:
+            last_exc = exc
+            wait = min(int(exc.seconds) + 1, COPY_RETRY_SLEEP_CAP_SECONDS)
+            log.warning(
+                f"[album retry floodwait] attempt={attempt}/{attempts} wait={wait}s "
+                f"route={route['name']} first_msg={getattr(first, 'id', None)}"
+            )
+            await asyncio.sleep(wait)
+        except Exception as exc:
+            last_exc = exc
+            if attempt < attempts and is_transient_copy_error(exc):
+                wait = min(2 * attempt, COPY_RETRY_SLEEP_CAP_SECONDS)
+                log.warning(
+                    f"[album retry transient] attempt={attempt}/{attempts} wait={wait}s "
+                    f"route={route['name']} first_msg={getattr(first, 'id', None)} error={exc}"
+                )
+                await asyncio.sleep(wait)
+                continue
+            raise
+
+    if last_exc:
+        raise last_exc
+
+    return None
+
+
 async def handle_single_message(event, edited=False):
     message = event.message
     chat_id = event.chat_id
@@ -810,7 +894,7 @@ async def handle_single_message(event, edited=False):
                 log.info(f"[duplicate skipped] {route['name']} source={chat_id}_{topic_id} msg={message.id}")
                 continue
 
-            sent = await copy_one(message, route, edited=edited)
+            sent = await copy_one_with_retry(message, route, edited=edited)
 
             if not sent:
                 log.warning(f"[copy returned none] {route['name']} source={chat_id}_{topic_id} msg={getattr(message, 'id', None)}")
@@ -893,7 +977,7 @@ async def on_album(event):
                     log.info(f"[album duplicate skipped] {route['name']} source={chat_id}_{topic_id} items={len(event.messages)}")
                     continue
 
-                sent = await copy_album(event.messages, route)
+                sent = await copy_album_with_retry(event.messages, route)
 
                 if not sent:
                     log.warning(f"[album copy returned none] {route['name']} source={chat_id}_{topic_id} items={len(event.messages)}")
@@ -941,6 +1025,8 @@ async def main():
     log.info(f"ENABLE_ALBUM_HANDLER={ENABLE_ALBUM_HANDLER}")
     log.info(f"ENABLE_ROUTE_FALLBACK_ALL_MESSAGES={ENABLE_ROUTE_FALLBACK_ALL_MESSAGES}")
     log.info(f"ENABLE_ALBUM_REUPLOAD_FALLBACK={ENABLE_ALBUM_REUPLOAD_FALLBACK}")
+    log.info(f"COPY_RETRY_ATTEMPTS={COPY_RETRY_ATTEMPTS}")
+    log.info(f"COPY_RETRY_SLEEP_CAP_SECONDS={COPY_RETRY_SLEEP_CAP_SECONDS}")
     log.info("Exact media/reply copy hardening active: True")
     log.info("Imperium fixed Telegram worker running...")
     asyncio.create_task(stats.loop(client))
@@ -949,7 +1035,12 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except Exception as exc:
+        log.exception(f"[worker fatal crash] {type(exc).__name__}: {exc}")
+        alert_crash("imperium-telegram-worker:fatal", exc)
+        raise
 
 
 
