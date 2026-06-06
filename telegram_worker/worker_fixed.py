@@ -424,7 +424,7 @@ def routes_for(chat_id, topic_id, message=None):
 
     # Media/reply fallback: if this source group has one destination topic,
     # forward there even when Telegram gives missing/wrong topic id.
-    if message is not None and is_real_media(message):
+    if message is not None and ENABLE_ROUTE_FALLBACK_ALL_MESSAGES:
         fallback = [r for r in unique_routes_for_source_chat(chat_id) if not is_blocked_destination(r)]
         if fallback:
             log.warning(
@@ -853,5 +853,6 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
