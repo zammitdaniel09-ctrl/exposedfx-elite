@@ -1,4 +1,4 @@
-import os
+﻿import os
 import json
 import base64
 import asyncio
@@ -34,6 +34,7 @@ DRY_RUN = os.environ.get("DRY_RUN", "0").strip() == "1"
 FORWARD_EDITED_MESSAGES = os.environ.get("FORWARD_EDITED_MESSAGES", "1").strip() == "1"
 PROCESS_GROUPED_MESSAGES_IN_NEW_HANDLER = os.environ.get("PROCESS_GROUPED_MESSAGES_IN_NEW_HANDLER", "1").strip() == "1"
 ENABLE_ALBUM_HANDLER = os.environ.get("ENABLE_ALBUM_HANDLER", "0").strip() == "1"
+ENABLE_ROUTE_FALLBACK_ALL_MESSAGES = os.environ.get("ENABLE_ROUTE_FALLBACK_ALL_MESSAGES", "1").strip() == "1"
 
 DATA_DIR = Path(os.environ.get("DATA_DIR") or "./data")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -842,6 +843,7 @@ async def main():
     log.info(f"BLOCKED_SENDER_IDS={sorted(BLOCKED_SENDER_IDS)}")
     log.info(f"PROCESS_GROUPED_MESSAGES_IN_NEW_HANDLER={PROCESS_GROUPED_MESSAGES_IN_NEW_HANDLER}")
     log.info(f"ENABLE_ALBUM_HANDLER={ENABLE_ALBUM_HANDLER}")
+    log.info(f"ENABLE_ROUTE_FALLBACK_ALL_MESSAGES={ENABLE_ROUTE_FALLBACK_ALL_MESSAGES}")
     log.info("Exact media/reply copy hardening active: True")
     log.info("Imperium fixed Telegram worker running...")
     asyncio.create_task(stats.loop(client))
@@ -851,3 +853,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
