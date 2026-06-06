@@ -428,7 +428,7 @@ def routes_for(chat_id, topic_id, message=None):
         fallback = [r for r in unique_routes_for_source_chat(chat_id) if not is_blocked_destination(r)]
         if fallback:
             log.warning(
-                f"[media route fallback] source={chat_id}_{topic_id} "
+                f"[route fallback] source={chat_id}_{topic_id} "
                 f"msg={getattr(message, 'id', None)} -> "
                 f"dest={fallback[0]['dest_chat']}_{fallback[0]['dest_topic']}"
             )
@@ -853,4 +853,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
