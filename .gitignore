@@ -12,3 +12,20 @@ SESSION_B64.txt
 SESSION_B64.txt
 
 SESSION_B64.txt
+
+# Local ExposedFX scratch / secret files
+*SESSION*VARS*.txt
+*session*vars*.txt
+*unique_RAILWAY_VARS.txt
+AI_FORMATTER_FRESH_SESSION_VARS.txt
+AI_FORMATTER_PERMANENT_FRESH_V2_SESSION_VARS.txt
+FORWARDER_SESSION_VARS.txt
+CLEAN_FORWARDER_SESSION_VARS.txt
+IMPERIUM_FORWARDER_SESSION_VARS.txt
+_patch_*.py
+_sanity_*.py
+patch_*.py
+fix_*.py
+sanity_*.py
+make_*session*.py
+make_sessions.py
