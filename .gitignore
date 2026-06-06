@@ -29,3 +29,16 @@ fix_*.py
 sanity_*.py
 make_*session*.py
 make_sessions.py
+add_*.py
+delete_topic_*.py
+emergency_*.py
+get_*topics*.py
+go_live_*.py
+hotfix_*.py
+maintenance_patch_*.py
+selected_upgrades_patch.py
+test_*signal*.py
+test_*parser*.py
+test_numeric_parser.py
+update_route_*.py
+verify_*fixed.py
