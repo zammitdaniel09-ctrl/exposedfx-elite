@@ -1,4 +1,4 @@
-﻿import os
+import os
 import json
 import base64
 import asyncio
@@ -35,6 +35,8 @@ FORWARD_EDITED_MESSAGES = os.environ.get("FORWARD_EDITED_MESSAGES", "1").strip()
 PROCESS_GROUPED_MESSAGES_IN_NEW_HANDLER = os.environ.get("PROCESS_GROUPED_MESSAGES_IN_NEW_HANDLER", "1").strip() == "1"
 ENABLE_ALBUM_HANDLER = os.environ.get("ENABLE_ALBUM_HANDLER", "0").strip() == "1"
 ENABLE_ROUTE_FALLBACK_ALL_MESSAGES = os.environ.get("ENABLE_ROUTE_FALLBACK_ALL_MESSAGES", "1").strip() == "1"
+ENABLE_ALBUM_REUPLOAD_FALLBACK = os.environ.get("ENABLE_ALBUM_REUPLOAD_FALLBACK", "1").strip() == "1"
+NO_ROUTE_TEXT_LIMIT = int(os.environ.get("NO_ROUTE_TEXT_LIMIT", "180"))
 
 DATA_DIR = Path(os.environ.get("DATA_DIR") or "./data")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -422,14 +424,18 @@ def routes_for(chat_id, topic_id, message=None):
     if found:
         return found
 
-    # Media/reply fallback: if this source group has one destination topic,
-    # forward there even when Telegram gives missing/wrong topic id.
+    # Route fallback:
+    # Telegram sometimes gives missing/wrong topic metadata for forum messages.
+    # If every route from that source chat goes to ONE destination, forward there
+    # instead of silently dropping the message. This is safe for one-destination source groups.
     if message is not None and ENABLE_ROUTE_FALLBACK_ALL_MESSAGES:
         fallback = [r for r in unique_routes_for_source_chat(chat_id) if not is_blocked_destination(r)]
         if fallback:
+            kind = "media" if is_real_media(message) else "text"
             log.warning(
-                f"[route fallback] source={chat_id}_{topic_id} "
-                f"msg={getattr(message, 'id', None)} -> "
+                f"[route fallback:{kind}] source={chat_id}_{topic_id} "
+                f"msg={getattr(message, 'id', None)} grouped={getattr(message, 'grouped_id', None)} "
+                f"reply_ids={reply_source_ids(message)} -> "
                 f"dest={fallback[0]['dest_chat']}_{fallback[0]['dest_topic']}"
             )
             return fallback
@@ -685,6 +691,7 @@ async def copy_album(messages, route):
     first = messages[0]
     await ensure_replied_message_copied(first, route)
     target_reply = reply_target(first, route)
+
     files = []
     caption = None
     caption_entities = None
@@ -700,19 +707,65 @@ async def copy_album(messages, route):
 
     if DRY_RUN:
         log.info(f"[DRY_RUN album] {route['name']} items={len(files)}")
-        return
+        return None
 
     if not files:
-        return
+        log.info(f"[album skip empty] {route['name']} first_msg={getattr(first, 'id', None)}")
+        return None
 
-    sent = await client.send_file(
-        route["dest_chat"],
-        files,
-        caption=caption,
-        formatting_entities=caption_entities,
-        parse_mode=None,
-        reply_to=target_reply,
-    )
+    sent = None
+    downloaded_files = []
+
+    try:
+        sent = await client.send_file(
+            route["dest_chat"],
+            files,
+            caption=caption,
+            formatting_entities=caption_entities,
+            parse_mode=None,
+            reply_to=target_reply,
+        )
+    except Exception as exc:
+        log.warning(f"[album direct copy failed] {route['name']} first_msg={getattr(first, 'id', None)}: {exc}")
+
+        if not ENABLE_ALBUM_REUPLOAD_FALLBACK:
+            raise
+
+        cache_dir = DATA_DIR / "media_cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            for msg in messages:
+                if not is_real_media(msg):
+                    continue
+
+                downloaded = await msg.download_media(
+                    file=str(cache_dir / f"album_{route['dest_topic']}_{msg.id}")
+                )
+
+                if downloaded:
+                    downloaded_files.append(downloaded)
+
+            if not downloaded_files:
+                raise RuntimeError("album fallback downloaded no files")
+
+            sent = await client.send_file(
+                route["dest_chat"],
+                downloaded_files,
+                caption=caption,
+                formatting_entities=caption_entities,
+                parse_mode=None,
+                reply_to=target_reply,
+            )
+
+            log.info(f"[album fallback reupload ok] {route['name']} items={len(downloaded_files)}")
+
+        finally:
+            for downloaded in downloaded_files:
+                try:
+                    Path(downloaded).unlink(missing_ok=True)
+                except Exception:
+                    pass
 
     if isinstance(sent, list):
         for src, dst in zip(messages, sent):
@@ -720,28 +773,36 @@ async def copy_album(messages, route):
     else:
         remember_message(first, sent, route)
 
+    return sent
+
 
 async def handle_single_message(event, edited=False):
     message = event.message
+    chat_id = event.chat_id
+    topic_id = topic_of(message, chat_id)
+    text = text_of(message)
 
     if is_blocked_sender(message):
         log.warning(f"[blocked sender] ids={sorted(sender_ids_for_message(message))} msg={getattr(message, 'id', None)}")
         return
 
-    if is_promo_text(text_of(message), topic_of(message)):
-        log.info(f"[promo blocked incoming] msg={getattr(message, 'id', None)}")
+    if is_promo_text(text, topic_id):
+        log.info(f"[promo blocked incoming] msg={getattr(message, 'id', None)} topic={topic_id}")
         return
+
     if getattr(message, "grouped_id", None) and not PROCESS_GROUPED_MESSAGES_IN_NEW_HANDLER:
         return
 
-    chat_id = event.chat_id
-    topic_id = topic_of(message, chat_id)
     routes = routes_for(chat_id, topic_id, message)
     if not routes:
-        log.info(f"[no route] source={chat_id}_{topic_id} msg={getattr(message, 'id', None)} text={text_of(message)[:80]!r}")
+        known = sorted(known_source_topics_for_chat(chat_id))
+        log.warning(
+            f"[no route] source={chat_id}_{topic_id} msg={getattr(message, 'id', None)} "
+            f"grouped={getattr(message, 'grouped_id', None)} media={is_real_media(message)} "
+            f"reply_ids={reply_source_ids(message)} known_topics={known[:40]} "
+            f"text={text[:NO_ROUTE_TEXT_LIMIT]!r}"
+        )
         return
-
-    text = text_of(message)
 
     for route in routes:
         try:
@@ -749,7 +810,12 @@ async def handle_single_message(event, edited=False):
                 log.info(f"[duplicate skipped] {route['name']} source={chat_id}_{topic_id} msg={message.id}")
                 continue
 
-            await copy_one(message, route, edited=edited)
+            sent = await copy_one(message, route, edited=edited)
+
+            if not sent:
+                log.warning(f"[copy returned none] {route['name']} source={chat_id}_{topic_id} msg={getattr(message, 'id', None)}")
+                continue
+
             remember_dedupe(route, message, text)
 
             if text:
@@ -765,62 +831,92 @@ async def handle_single_message(event, edited=False):
             await asyncio.sleep(min(exc.seconds + 1, 60))
 
         except Exception as exc:
-            log.error(f"[copy failed] {route['name']}: {exc}")
+            log.exception(f"[copy failed] {route['name']} source={chat_id}_{topic_id} msg={getattr(message, 'id', None)}: {exc}")
 
 
 @client.on(events.NewMessage(chats=SOURCE_CHATS))
 async def on_message(event):
-    await handle_single_message(event, edited=False)
+    try:
+        await handle_single_message(event, edited=False)
+    except Exception as exc:
+        log.exception(f"[handler crash:on_message] chat={getattr(event, 'chat_id', None)}: {exc}")
+        alert_crash("imperium-telegram-worker:on_message", exc)
 
 
 @client.on(events.MessageEdited(chats=SOURCE_CHATS))
 async def on_message_edited(event):
-    if FORWARD_EDITED_MESSAGES:
+    if not FORWARD_EDITED_MESSAGES:
+        return
+    try:
         await handle_single_message(event, edited=True)
+    except Exception as exc:
+        log.exception(f"[handler crash:on_message_edited] chat={getattr(event, 'chat_id', None)}: {exc}")
+        alert_crash("imperium-telegram-worker:on_message_edited", exc)
 
 
 @client.on(events.Album(chats=SOURCE_CHATS))
 async def on_album(event):
-    if not ENABLE_ALBUM_HANDLER:
-        return
-    if not event.messages:
-        return
+    try:
+        if not ENABLE_ALBUM_HANDLER:
+            return
+        if not event.messages:
+            return
 
-    first = event.messages[0]
+        first = event.messages[0]
 
-    if any(is_blocked_sender(m) for m in event.messages):
-        ids = sorted(set().union(*(sender_ids_for_message(m) for m in event.messages)))
-        log.warning(f"[blocked sender album] ids={ids} first_msg={getattr(first, 'id', None)}")
-        return
+        if any(is_blocked_sender(m) for m in event.messages):
+            ids = sorted(set().union(*(sender_ids_for_message(m) for m in event.messages)))
+            log.warning(f"[blocked sender album] ids={ids} first_msg={getattr(first, 'id', None)}")
+            return
 
-    chat_id = event.chat_id
-    topic_id = topic_of(first, chat_id)
-    routes = routes_for(chat_id, topic_id, first)
-    if not routes:
-        return
+        chat_id = event.chat_id
+        topic_id = topic_of(first, chat_id)
+        routes = routes_for(chat_id, topic_id, first)
 
-    text = ""
-    for msg in event.messages:
-        text = text_of(msg)
-        if text:
-            break
+        if not routes:
+            known = sorted(known_source_topics_for_chat(chat_id))
+            log.warning(
+                f"[album no route] source={chat_id}_{topic_id} first_msg={getattr(first, 'id', None)} "
+                f"items={len(event.messages)} known_topics={known[:40]}"
+            )
+            return
 
-    for route in routes:
-        try:
-            if text and is_recent_duplicate(route, first, text):
-                log.info(f"[album duplicate skipped] {route['name']} source={chat_id}_{topic_id} items={len(event.messages)}")
-                continue
-
-            await copy_album(event.messages, route)
+        text = ""
+        for msg in event.messages:
+            text = text_of(msg)
             if text:
-                remember_dedupe(route, first, text)
-            if text:
-                maybe_post_signal(route, first, text)
-                log_stats(route, first, text)
-            direction = "outgoing" if getattr(first, "out", False) else "incoming"
-            log.info(f"[album copied:{direction}] {route['name']} items={len(event.messages)}")
-        except Exception as exc:
-            log.error(f"[album failed] {route['name']}: {exc}")
+                break
+
+        for route in routes:
+            try:
+                if text and is_recent_duplicate(route, first, text):
+                    log.info(f"[album duplicate skipped] {route['name']} source={chat_id}_{topic_id} items={len(event.messages)}")
+                    continue
+
+                sent = await copy_album(event.messages, route)
+
+                if not sent:
+                    log.warning(f"[album copy returned none] {route['name']} source={chat_id}_{topic_id} items={len(event.messages)}")
+                    continue
+
+                if text:
+                    remember_dedupe(route, first, text)
+                    maybe_post_signal(route, first, text)
+                    log_stats(route, first, text)
+
+                direction = "outgoing" if getattr(first, "out", False) else "incoming"
+                log.info(f"[album copied:{direction}] {route['name']} items={len(event.messages)}")
+
+            except FloodWaitError as exc:
+                log.warning(f"FloodWait album {exc.seconds}s")
+                await asyncio.sleep(min(exc.seconds + 1, 60))
+
+            except Exception as exc:
+                log.exception(f"[album failed] {route['name']} source={chat_id}_{topic_id} first_msg={getattr(first, 'id', None)}: {exc}")
+
+    except Exception as exc:
+        log.exception(f"[handler crash:on_album] chat={getattr(event, 'chat_id', None)}: {exc}")
+        alert_crash("imperium-telegram-worker:on_album", exc)
 
 
 async def main():
@@ -844,6 +940,7 @@ async def main():
     log.info(f"PROCESS_GROUPED_MESSAGES_IN_NEW_HANDLER={PROCESS_GROUPED_MESSAGES_IN_NEW_HANDLER}")
     log.info(f"ENABLE_ALBUM_HANDLER={ENABLE_ALBUM_HANDLER}")
     log.info(f"ENABLE_ROUTE_FALLBACK_ALL_MESSAGES={ENABLE_ROUTE_FALLBACK_ALL_MESSAGES}")
+    log.info(f"ENABLE_ALBUM_REUPLOAD_FALLBACK={ENABLE_ALBUM_REUPLOAD_FALLBACK}")
     log.info("Exact media/reply copy hardening active: True")
     log.info("Imperium fixed Telegram worker running...")
     asyncio.create_task(stats.loop(client))
