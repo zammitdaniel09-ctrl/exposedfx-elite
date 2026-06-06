@@ -61,8 +61,11 @@ FORWARD_SIGNAL_CANDIDATES = os.environ.get("FORWARD_SIGNAL_CANDIDATES", "1").str
 PARTIAL_BUFFER_ENABLED = os.environ.get("PARTIAL_SIGNAL_BUFFER", "1").strip() == "1"
 BUFFER_WINDOW_SECONDS = int(os.environ.get("SIGNAL_BUFFER_SECONDS", "600"))
 BUFFER_MAX_MESSAGES = int(os.environ.get("SIGNAL_BUFFER_MAX_MESSAGES", "8"))
-DEFAULT_ALLOWED_TOPICS = "23,430,28,2,31,35,11,363,25,29,33,20,362,17,34,22,9,36,10,14,4,16,13,12,8,7,6,5,3"
+DEFAULT_ALLOWED_TOPICS = "23,430,28,2,31,35,11,363,25,29,33,20,362,17,34,22,9,36,10,14,4,16,13,12,8,7,6,5,3,15,567,568,569,570,1927,8587"
 ALLOWED_SOURCE_TOPICS = topic_set_from_env("ALLOWED_SOURCE_TOPICS", DEFAULT_ALLOWED_TOPICS)
+CONTENT_DEDUPE_ENABLED = os.environ.get("CONTENT_DEDUPE_ENABLED", "0").strip() == "1"
+SIGNAL_SEND_RETRY_ATTEMPTS = int(os.environ.get("SIGNAL_SEND_RETRY_ATTEMPTS", "2"))
+SIGNAL_SEND_RETRY_SLEEP_CAP_SECONDS = int(os.environ.get("SIGNAL_SEND_RETRY_SLEEP_CAP_SECONDS", "120"))
 
 buffers = defaultdict(lambda: deque(maxlen=BUFFER_MAX_MESSAGES))
 sent_signatures = deque(maxlen=300)
@@ -104,6 +107,11 @@ TOPIC_NAMES = {
     363: "R363 Signals",
     430: "Route 430",
     1927: "Route 1927",
+    567: "Route 567",
+    568: "Route 568",
+    569: "Route 569",
+    570: "Route 570",
+    8587: "Route 8587",
 }
 
 
@@ -135,21 +143,33 @@ def message_text(message):
 
 
 def topic_id_of(message):
-    direct_top = getattr(message, "reply_to_top_id", None)
-    if direct_top:
-        return int(direct_top)
+    for attr in ("reply_to_top_id", "top_msg_id"):
+        value = getattr(message, attr, None)
+        if value:
+            try:
+                return int(value)
+            except Exception:
+                pass
+
     direct_msg = getattr(message, "reply_to_msg_id", None)
     if direct_msg and getattr(message, "is_topic_message", False):
-        return int(direct_msg)
+        try:
+            return int(direct_msg)
+        except Exception:
+            pass
+
     reply = getattr(message, "reply_to", None)
     if not reply:
         return None
-    top_id = getattr(reply, "reply_to_top_id", None)
-    if top_id:
-        return int(top_id)
-    msg_id = getattr(reply, "reply_to_msg_id", None)
-    if msg_id:
-        return int(msg_id)
+
+    for attr in ("reply_to_top_id", "top_msg_id", "reply_to_msg_id"):
+        value = getattr(reply, attr, None)
+        if value:
+            try:
+                return int(value)
+            except Exception:
+                pass
+
     return None
 
 
@@ -280,7 +300,7 @@ async def maybe_send_signal_update_reply(message, key, text):
 
     ai_msg_id = packet_ids[1]
 
-    sent = await client.send_message(
+    sent = await send_message_with_retry(
         SIGNAL_DEST_CHAT,
         update_text,
         parse_mode="html",
@@ -428,7 +448,7 @@ async def maybe_send_lifecycle_update(message, key, text):
 
     update_text = direct_update or move_update["text"]
 
-    sent = await client.send_message(
+    sent = await send_message_with_retry(
         SIGNAL_DEST_CHAT,
         update_text,
         parse_mode="html",
@@ -718,6 +738,81 @@ async def forward_original(message, text):
         return sent
 
 
+def is_transient_send_error(exc):
+    text = str(exc).lower()
+    patterns = (
+        "timeout",
+        "timed out",
+        "connection",
+        "server disconnected",
+        "temporarily",
+        "transport",
+        "network",
+        "request failed",
+        "flood",
+    )
+    return any(p in text for p in patterns)
+
+
+async def send_message_with_retry(*args, **kwargs):
+    attempts = max(1, SIGNAL_SEND_RETRY_ATTEMPTS)
+    last_exc = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            return await client.send_message(*args, **kwargs)
+        except Exception as exc:
+            last_exc = exc
+            name = type(exc).__name__
+            wait = 0
+
+            seconds = getattr(exc, "seconds", None)
+            if seconds is not None:
+                wait = min(int(seconds) + 1, SIGNAL_SEND_RETRY_SLEEP_CAP_SECONDS)
+            elif attempt < attempts and is_transient_send_error(exc):
+                wait = min(2 * attempt, SIGNAL_SEND_RETRY_SLEEP_CAP_SECONDS)
+
+            if wait and attempt < attempts:
+                log.warning(f"[signal send retry] attempt={attempt}/{attempts} wait={wait}s error={name}: {exc}")
+                await asyncio.sleep(wait)
+                continue
+
+            raise
+
+    if last_exc:
+        raise last_exc
+
+    return None
+
+
+async def forward_original_with_retry(message, text):
+    attempts = max(1, SIGNAL_SEND_RETRY_ATTEMPTS)
+    last_exc = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            return await forward_original(message, text)
+        except Exception as exc:
+            last_exc = exc
+            seconds = getattr(exc, "seconds", None)
+            if seconds is not None and attempt < attempts:
+                wait = min(int(seconds) + 1, SIGNAL_SEND_RETRY_SLEEP_CAP_SECONDS)
+                log.warning(f"[signal original retry floodwait] attempt={attempt}/{attempts} wait={wait}s msg={getattr(message, 'id', None)}")
+                await asyncio.sleep(wait)
+                continue
+            if attempt < attempts and is_transient_send_error(exc):
+                wait = min(2 * attempt, SIGNAL_SEND_RETRY_SLEEP_CAP_SECONDS)
+                log.warning(f"[signal original retry transient] attempt={attempt}/{attempts} wait={wait}s msg={getattr(message, 'id', None)} error={exc}")
+                await asyncio.sleep(wait)
+                continue
+            raise
+
+    if last_exc:
+        raise last_exc
+
+    return None
+
+
 async def send_full_signal(message, result, key, original_text, forward_raw=True):
     sig = signature_for(result, key, getattr(message, "id", None))
     content_sig = content_signature_for(result, key)
@@ -726,7 +821,7 @@ async def send_full_signal(message, result, key, original_text, forward_raw=True
         log.info("[signal hub skipped] duplicate signal packet")
         return False
 
-    if content_sig in sent_content_signature_set:
+    if CONTENT_DEDUPE_ENABLED and content_sig in sent_content_signature_set:
         log.info("[signal hub skipped] duplicate content signal")
         return False
 
@@ -737,13 +832,13 @@ async def send_full_signal(message, result, key, original_text, forward_raw=True
         sent_messages = []
 
         if forward_raw:
-            original_sent = await forward_original(message, original_text)
+            original_sent = await forward_original_with_retry(message, original_text)
             if original_sent:
                 sent_messages.append(original_sent)
 
         reply_to_id = getattr(original_sent, "id", None)
 
-        ai_sent = await client.send_message(
+        ai_sent = await send_message_with_retry(
             SIGNAL_DEST_CHAT,
             result["message"],
             parse_mode="html",
@@ -753,7 +848,7 @@ async def send_full_signal(message, result, key, original_text, forward_raw=True
         sent_messages.append(ai_sent)
 
         if SEND_SOURCE_LINE:
-            source_sent = await client.send_message(
+            source_sent = await send_message_with_retry(
                 SIGNAL_DEST_CHAT,
                 result["source"],
                 parse_mode="html",
@@ -764,7 +859,8 @@ async def send_full_signal(message, result, key, original_text, forward_raw=True
 
         remember_signal_packet(message, key, sent_messages)
         remember_signature(sig)
-        remember_content_signature(content_sig)
+        if CONTENT_DEDUPE_ENABLED:
+            remember_content_signature(content_sig)
         remember_last_signal_context(key, result)
 
     except Exception as exc:
@@ -807,6 +903,13 @@ async def on_signal_hub_message(event):
 
         if is_promo_text(text, topic_id_of(message)):
             log.info("[signal hub skipped] promo/spam filter")
+            return
+
+        # Management updates must be handled before new-signal extraction/buffering.
+        # Otherwise TP/pips replies can be skipped as "not signal-like".
+        if await maybe_send_lifecycle_update(message, key, text):
+            return
+        if await maybe_send_signal_update_reply(message, key, text):
             return
 
         # First try this message alone. Complete setups should not enter the partial buffer.
@@ -872,7 +975,9 @@ async def main():
     log.info("AI/source replies to the forwarded original: True")
     log.info(f"Universal AI extractor active for any pair")
     log.info(f"Partial signal buffer: {PARTIAL_BUFFER_ENABLED} | window={BUFFER_WINDOW_SECONDS}s | max={BUFFER_MAX_MESSAGES}")
-    log.info(f"Content signal dedupe active: True")
+    log.info(f"Content signal dedupe active: {CONTENT_DEDUPE_ENABLED}")
+    log.info(f"SIGNAL_SEND_RETRY_ATTEMPTS={SIGNAL_SEND_RETRY_ATTEMPTS}")
+    log.info(f"SIGNAL_SEND_RETRY_SLEEP_CAP_SECONDS={SIGNAL_SEND_RETRY_SLEEP_CAP_SECONDS}")
     log.info(f"TP same-as-above context active: True")
     log.info(f"Signal update replies active: True")
     log.info("Signal lifecycle tracking active: True")
@@ -885,4 +990,9 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except Exception as exc:
+        log.exception(f"[signal hub fatal crash] {type(exc).__name__}: {exc}")
+        alert_crash("exposedfx-ai-signal-formatter:fatal", exc)
+        raise
