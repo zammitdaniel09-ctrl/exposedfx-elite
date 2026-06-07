@@ -704,10 +704,12 @@ async def maybe_send_lifecycle_update(message, key, text):
         rec = last_active_signal_by_topic.get(int(key))
 
     if not rec:
+        log.info(f"[signal update no lifecycle] key={key} msg={message.id} text={text[:100]!r}")
         return False
 
     ai_msg_id = rec.get("ai_dest_id")
     if not ai_msg_id:
+        log.info(f"[signal update no ai target] key={key} msg={message.id} rec={rec}")
         return False
 
     update_text = direct_update or move_update["text"]
@@ -846,6 +848,78 @@ def remember_signal_packet(message, key, sent_messages):
 
 
 signal_packet_map = load_packet_map()
+
+def recover_lifecycle_from_packet_map_if_empty():
+    """
+    Minimal recovery:
+    packet map has source_msg -> [original_dest_id, ai_dest_id, source_line_id].
+    Even without parsed levels, this is enough to reply updates to latest AI message.
+    """
+    global active_signal_lifecycle, last_active_signal_by_topic
+
+    if active_signal_lifecycle:
+        return 0
+
+    recovered = 0
+
+    try:
+        items = list(signal_packet_map.items())
+    except Exception:
+        return 0
+
+    for pkey, ids in items:
+        try:
+            parts = str(pkey).split(":")
+            if len(parts) < 3:
+                continue
+
+            topic = int(parts[-2])
+            source_msg_id = int(parts[-1])
+
+            if not isinstance(ids, list) or len(ids) < 2:
+                continue
+
+            dest_ids = [int(x) for x in ids if x]
+            if len(dest_ids) < 2:
+                continue
+
+            rec = {
+                "source_msg_id": source_msg_id,
+                "topic": topic,
+                "created_ts": time.time(),
+                "last_update_ts": time.time(),
+                "dest_ids": dest_ids,
+                "original_dest_id": dest_ids[0],
+                "ai_dest_id": dest_ids[1],
+                "source_dest_id": dest_ids[2] if len(dest_ids) > 2 else None,
+                "status": "OPEN",
+                "symbol": None,
+                "direction": None,
+                "order_type": None,
+                "entry_low": None,
+                "entry_high": None,
+                "sl": None,
+                "tps": [],
+                "updates": [],
+                "recovered_from_packet_map": True,
+            }
+
+            active_signal_lifecycle[pkey] = rec
+            last_active_signal_by_topic[topic] = rec
+            recovered += 1
+
+        except Exception as exc:
+            log.warning(f"[lifecycle packet recovery item failed] pkey={pkey}: {exc}")
+
+    if recovered:
+        save_signal_lifecycle()
+        log.info(f"[lifecycle packet recovery] recovered={recovered}")
+
+    return recovered
+
+
+recovered_lifecycle_records = recover_lifecycle_from_packet_map_if_empty()
+
 
 
 def trim_buffer(key):
@@ -1130,6 +1204,7 @@ async def send_full_signal(message, result, key, original_text, forward_raw=True
             sent_messages.append(source_sent)
 
         remember_signal_packet(message, key, sent_messages)
+        remember_lifecycle(message, key, result, sent_messages)
         remember_signature(sig)
         if CONTENT_DEDUPE_ENABLED:
             remember_content_signature(content_sig)
@@ -1217,6 +1292,26 @@ def should_buffer_partial_piece(text: str) -> bool:
     return False
 
 
+def is_any_signal_update_text(text: str) -> bool:
+    """
+    Recognition-only check.
+    If true, this message is an update, not a partial signal piece.
+    """
+    try:
+        if classify_signal_update_text(text):
+            return True
+    except Exception as exc:
+        log.warning(f"[update classify check failed] {exc}")
+
+    try:
+        if move_update_from_text(text):
+            return True
+    except Exception as exc:
+        log.warning(f"[move update check failed] {exc}")
+
+    return False
+
+
 @client.on(events.NewMessage())
 @client.on(events.MessageEdited())
 async def on_signal_hub_message(event):
@@ -1242,6 +1337,11 @@ async def on_signal_hub_message(event):
         if await maybe_send_lifecycle_update(message, key, text):
             return
         if await maybe_send_signal_update_reply(message, key, text):
+            return
+
+        # If it is clearly an update but no target was found, do NOT let it enter extraction/buffer.
+        if is_any_signal_update_text(text):
+            log.info(f"[signal update unmatched] recognized update but no AI target key={key} msg={message.id} text={text[:100]!r}")
             return
 
         # First try this message alone. Complete setups should not enter the partial buffer.
@@ -1316,6 +1416,9 @@ async def main():
     log.info("Signal update formatter v2 active: True")
     log.info(f"UPDATE_REPLY_DEDUPE_SECONDS={UPDATE_REPLY_DEDUPE_SECONDS}")
     log.info(f"Loaded lifecycle records: {len(active_signal_lifecycle)}")
+    log.info(f"Recovered lifecycle records from packet map: {recovered_lifecycle_records}")
+    log.info("Lifecycle open on signal send active: True")
+    log.info("Recognized updates blocked from partial buffer: True")
     log.info("Signal lifecycle tracking active: True")
     log.info("Provider profiles active: True")
     log.info("Promo filter active: True")
