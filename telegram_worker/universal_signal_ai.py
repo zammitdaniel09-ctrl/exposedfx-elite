@@ -106,8 +106,82 @@ def clean(text: str) -> str:
     return normalize_provider_text(text)
 
 
+def actionable_signal_text(text: str) -> str:
+    """
+    If a message says an old trade hit SL and then gives a new trade,
+    only parse the new trade part.
+
+    Example:
+    Activated and hit stoploss, go in to the next trade:
+    SELL LIMIT BTCUSD @ 63000...
+    """
+    raw = clean(text)
+    up = raw.upper()
+
+    markers = [
+        "GO IN TO THE NEXT TRADE",
+        "GO INTO THE NEXT TRADE",
+        "NEXT TRADE:",
+        "NEW TRADE:",
+        "NEXT SETUP:",
+        "NEW SETUP:",
+    ]
+
+    has_stop_context = bool(re.search(
+        r"\b(HIT\s+STOPLOSS|HIT\s+STOP\s*LOSS|STOPLOSS\s+HIT|STOP\s*LOSS\s+HIT|SL\s+HIT|STOP\s+PRESO|STOPPED\s+OUT)\b",
+        up,
+    ))
+
+    if not has_stop_context:
+        return raw
+
+    best_pos = None
+    best_marker = None
+
+    for marker in markers:
+        pos = up.find(marker)
+        if pos >= 0 and (best_pos is None or pos < best_pos):
+            best_pos = pos
+            best_marker = marker
+
+    if best_pos is None:
+        return raw
+
+    sliced = raw[best_pos + len(best_marker):].strip(" :\n\r\t-")
+    if sliced:
+        return sliced
+
+    return raw
+
+
+def is_invalidated_trade_notice(text: str) -> bool:
+    """
+    Pure management/invalidated message. Do not parse as a fresh signal.
+    If it contains a next-trade section, actionable_signal_text() handles it.
+    """
+    raw = clean(text)
+    up = raw.upper()
+
+    has_stop_context = bool(re.search(
+        r"\b(HIT\s+STOPLOSS|HIT\s+STOP\s*LOSS|STOPLOSS\s+HIT|STOP\s*LOSS\s+HIT|SL\s+HIT|STOP\s+PRESO|STOPPED\s+OUT)\b",
+        up,
+    ))
+
+    has_next_trade = bool(re.search(
+        r"\b(GO\s+IN\s+TO\s+THE\s+NEXT\s+TRADE|GO\s+INTO\s+THE\s+NEXT\s+TRADE|NEXT\s+TRADE|NEW\s+TRADE|NEXT\s+SETUP|NEW\s+SETUP)\b",
+        up,
+    ))
+
+    # If it is a stop notice with no new trade, block it completely.
+    return has_stop_context and not has_next_trade
+
+
 def is_trade_management_update(text: str) -> bool:
     raw = clean(text)
+
+    if is_invalidated_trade_notice(raw):
+        return True
+
     t = raw.upper()
     low = raw.lower()
 
@@ -172,7 +246,7 @@ def has_strict_new_signal_requirements(text: str) -> bool:
     A complete signal needs direction + SL + usable entry/price.
     Split signals are handled by worker_signal_hub before this function.
     """
-    raw = clean(text)
+    raw = actionable_signal_text(text)
     t = raw.upper()
 
     if is_trade_management_update(raw):
@@ -1128,7 +1202,7 @@ def order_type_from_text(text: str, direction: str) -> str:
 
 
 def regex_extract(text: str) -> Optional[Dict[str, Any]]:
-    raw = clean(text)
+    raw = actionable_signal_text(text)
 
     if not has_strict_new_signal_requirements(raw):
         return None
@@ -1265,6 +1339,7 @@ def _claude_budget_remaining():
 
 
 def claude_extract(text: str) -> Optional[Dict[str, Any]]:
+    text = actionable_signal_text(text)
     if not has_strict_new_signal_requirements(text):
         return None
     if not (USE_CLAUDE and ANTHROPIC_API_KEY):
@@ -1397,6 +1472,11 @@ def claude_extract(text: str) -> Optional[Dict[str, Any]]:
     return None
 
 def extract_and_format(text: str, source_name: str = "ExposedFX", message_id=None) -> Optional[Dict[str, Any]]:
+    text = actionable_signal_text(text)
+    if is_invalidated_trade_notice(text):
+        if CLAUDE_DEBUG_LOGS:
+            log.info("[extract skipped] invalidated trade notice")
+        return None
     if not has_strict_new_signal_requirements(text):
         if CLAUDE_DEBUG_LOGS:
             log.info("[extract skipped] strict requirements failed")
