@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 import time
@@ -17,6 +18,9 @@ CLAUDE_DAILY_BUDGET_USD = float(os.environ.get("CLAUDE_DAILY_BUDGET_USD", "8").s
 CLAUDE_USAGE_FILE = Path(os.environ.get("DATA_DIR") or "./data") / "claude_usage.json"
 USE_CLAUDE = os.environ.get("USE_CLAUDE_SIGNAL_AI", "1").strip() == "1"
 AUTO_TP_IF_MISSING = os.environ.get("AUTO_TP_IF_MISSING", "1").strip() == "1"
+STRICT_ENTRY_SAFETY = os.environ.get("STRICT_ENTRY_SAFETY", "1").strip() == "1"
+CLAUDE_DEBUG_LOGS = os.environ.get("CLAUDE_DEBUG_LOGS", "1").strip() == "1"
+log = logging.getLogger("universal-signal-ai")
 
 PRICE_RE = r"\d{1,7}(?:\.\d+)?"
 FOREX_CURRENCIES = {"EUR", "USD", "GBP", "JPY", "AUD", "NZD", "CAD", "CHF"}
@@ -38,7 +42,7 @@ def is_trade_management_update(text: str) -> bool:
     low = raw.lower()
 
     has_direction = bool(re.search(r"\b(BUY|BUYS|BUYING|SELL|SELLS|SELLING|LONG|LONGS|SHORT|SHORTS)\b", t))
-    has_sl = bool(re.search(r"\b(SL|S/L|STOP\s*LOSS|STOPLOSS|STOP)\b\s*(?:TO)?\s*[:@\-]?\s*\d", t))
+    has_sl = bool(re.search(r"\b(SL|S/L|STOP\s*LOSS|STOPLOSS|STOP)\b\s*(?:TO|AT|ABOVE|BELOW)?\s*[:@\-]?\s*\d", t))
     has_price = bool(re.search(rf"\b{PRICE_RE}\b", t))
 
     # A real setup can contain "high risk" or "pips" and must NOT be blocked.
@@ -105,7 +109,7 @@ def has_strict_new_signal_requirements(text: str) -> bool:
         return False
 
     has_direction = bool(re.search(r"\b(BUY|BUYS|BUYING|SELL|SELLS|SELLING|LONG|LONGS|SHORT|SHORTS)\b", t))
-    has_sl = bool(re.search(r"\b(SL|S/L|STOP\s*LOSS|STOPLOSS|STOP)\b\s*(?:TO)?\s*[:@\-]?\s*\d", t))
+    has_sl = bool(re.search(r"\b(SL|S/L|STOP\s*LOSS|STOPLOSS|STOP)\b\s*(?:TO|AT|ABOVE|BELOW)?\s*[:@\-]?\s*\d", t))
 
     if not (has_direction and has_sl):
         return False
@@ -458,6 +462,41 @@ def direction_from_text(text: str) -> Optional[str]:
     return None
 
 
+def has_entry_keyword(line: str) -> bool:
+    return bool(re.search(r"\b(ENTRY|ENTRIES|ENTER|ENTERING|ENTERED\s+AT|ZONE|AREA|AROUND|NOW|LIMIT|ABOVE|BELOW|OVER|UNDER)\b", line.upper()))
+
+
+def line_contains_protected_trade_level(line: str) -> bool:
+    return bool(re.search(r"\b(SL|S/L|STOP\s*LOSS|STOPLOSS|STOP|TP|TARGET|TAKE\s*PROFIT)\b", line.upper()))
+
+
+def remove_protected_trade_level_segments(line: str) -> str:
+    """
+    Remove SL/TP fragments so their prices are not accidentally treated as entries.
+    Example:
+    SELL GOLD SL 4450 TP 4430 -> SELL GOLD
+    SELL GOLD 4480 SL 4500 -> SELL GOLD 4480
+    """
+    cleaned = line
+
+    # Remove common SL/TP fragments with one or multiple numbers.
+    cleaned = re.sub(
+        rf"\b(?:SL|S/L|STOP\s*LOSS|STOPLOSS|STOP)\b\s*(?:TO|AT|ABOVE|BELOW)?\s*[:@\-]?\s*{PRICE_RE}(?:\s*(?:-|/|,|&|AND)\s*{PRICE_RE})*",
+        " ",
+        cleaned,
+        flags=re.I,
+    )
+
+    cleaned = re.sub(
+        rf"\b(?:TP\s*#?\s*\d*|TARGET\s*#?\s*\d*|TAKE\s*PROFIT\s*#?\s*\d*)\b\s*[:@\-]?\s*{PRICE_RE}(?:\s*(?:-|/|,|&|AND)\s*{PRICE_RE})*",
+        " ",
+        cleaned,
+        flags=re.I,
+    )
+
+    return cleaned
+
+
 def extract_entry(text: str) -> Optional[tuple[float, float]]:
     """
     Robust entry extractor.
@@ -559,10 +598,15 @@ def extract_entry(text: str) -> Optional[tuple[float, float]]:
         if bad_entry_line_re.search(line) and not direction_re.search(line):
             continue
 
-        nums = clean_entry_nums(line)
+        working_line = line
+
+        if STRICT_ENTRY_SAFETY and line_contains_protected_trade_level(line) and not has_entry_keyword(line):
+            working_line = remove_protected_trade_level_segments(line)
+
+        nums = clean_entry_nums(working_line)
 
         # Avoid NASDAQ 100 being treated as entry if it is the only number.
-        if len(nums) == 1 and re.search(r"\b(NASDAQ\s*100|NAS100|US100)\b", line):
+        if len(nums) == 1 and re.search(r"\b(NASDAQ\s*100|NAS100|US100)\b", working_line):
             nums = []
 
         if nums:
@@ -578,7 +622,11 @@ def extract_entry(text: str) -> Optional[tuple[float, float]]:
             if bad_entry_line_re.search(nxt):
                 continue
 
-            nums = clean_entry_nums(nxt)
+            working_nxt = nxt
+            if STRICT_ENTRY_SAFETY and line_contains_protected_trade_level(nxt) and not has_entry_keyword(nxt):
+                working_nxt = remove_protected_trade_level_segments(nxt)
+
+            nums = clean_entry_nums(working_nxt)
             result = make_entry(nums)
             if result:
                 return result
@@ -588,15 +636,25 @@ def extract_entry(text: str) -> Optional[tuple[float, float]]:
 
 
 def extract_sl(text: str) -> Optional[float]:
-    up = text.upper()
+    raw = clean(text)
+    up = raw.upper()
     vals = []
+
     patterns = [
-        rf"\b(?:SL|S/L|STOP\s*LOSS|STOPLOSS|STOP)\b(?:\s+TO)?\s*[:\-]?\s*({PRICE_RE})",
-        rf"\bSET\s+YOUR\s+STOP\s+LOSS\s+TO\s*({PRICE_RE})",
+        rf"\b(?:SL|S/L|STOP\s*LOSS|STOPLOSS|STOP)\b\s*(?:TO|AT|ABOVE|BELOW)?\s*[:@\-]?\s*({PRICE_RE})",
+        rf"\bSET\s+(?:YOUR\s+)?(?:SL|STOP\s*LOSS|STOPLOSS|STOP)\s*(?:TO|AT)?\s*[:@\-]?\s*({PRICE_RE})",
+        rf"\b(?:STOP|STOPLOSS|STOP\s*LOSS)\s+(?:ABOVE|BELOW)\s*({PRICE_RE})",
     ]
+
     for pat in patterns:
-        vals.extend(float(x) for x in re.findall(pat, up))
+        for x in re.findall(pat, up):
+            try:
+                vals.append(float(x))
+            except Exception:
+                pass
+
     return vals[-1] if vals else None
+
 
 
 def extract_tps(text: str) -> tuple[list[float], bool]:
@@ -721,36 +779,34 @@ def extract_tps_contextual(text: str, symbol: str, direction: str, entry_mid: fl
 
 def order_type_from_text(text: str, direction: str) -> str:
     """
-    Detect breakout pending orders.
-
-    SELL STOP:
-    - sells below 4458
-    - sell below 4458
-    - sell stop 4458
-    - break below 4458
-
-    BUY STOP:
-    - buys above 4458
-    - buy above 4458
-    - buy stop 4458
-    - break above 4458
+    Detect pending order / breakout wording.
+    Covers:
+    - sells below / sell under / shorts below
+    - buys above / buy over / longs above
+    - buy/sell stop
+    - break/breaks/breakout above/below
+    - above 4450 buy / below 4450 sell
     """
     t = clean(text).upper()
 
     if direction == "SELL":
-        if re.search(r"\b(SELL|SELLS|SHORT|SHORTS)\s+BELOW\b", t):
+        if re.search(r"\b(SELL|SELLS|SELLING|SHORT|SHORTS|SHORTING)\s+(BELOW|UNDER)\b", t):
             return "SELL_STOP"
         if re.search(r"\bSELL\s+STOP\b", t):
             return "SELL_STOP"
-        if re.search(r"\bBREAK\s+BELOW\b", t):
+        if re.search(r"\b(?:BREAK|BREAKS|BROKE|BREAKOUT|IF\s+BREAKS?)\s+(BELOW|UNDER)\b", t):
+            return "SELL_STOP"
+        if re.search(rf"\b(BELOW|UNDER)\s+{PRICE_RE}\b[^\n]{{0,30}}\b(SELL|SELLS|SHORT|SHORTS)\b", t):
             return "SELL_STOP"
 
     if direction == "BUY":
-        if re.search(r"\b(BUY|BUYS|LONG|LONGS)\s+ABOVE\b", t):
+        if re.search(r"\b(BUY|BUYS|BUYING|LONG|LONGS|LONGING)\s+(ABOVE|OVER)\b", t):
             return "BUY_STOP"
         if re.search(r"\bBUY\s+STOP\b", t):
             return "BUY_STOP"
-        if re.search(r"\bBREAK\s+ABOVE\b", t):
+        if re.search(r"\b(?:BREAK|BREAKS|BROKE|BREAKOUT|IF\s+BREAKS?)\s+(ABOVE|OVER)\b", t):
+            return "BUY_STOP"
+        if re.search(rf"\b(ABOVE|OVER)\s+{PRICE_RE}\b[^\n]{{0,30}}\b(BUY|BUYS|LONG|LONGS)\b", t):
             return "BUY_STOP"
 
     if re.search(r"\b(BUY|SELL)\s+LIMIT\b", t):
@@ -936,6 +992,8 @@ def claude_extract(text: str) -> Optional[Dict[str, Any]]:
             )
 
             if res.status_code >= 400:
+                if CLAUDE_DEBUG_LOGS:
+                    log.warning(f"[claude extract skipped] model={model} status={res.status_code} body={res.text[:200]!r}")
                 continue
 
             data = res.json()
@@ -999,16 +1057,22 @@ def claude_extract(text: str) -> Optional[Dict[str, Any]]:
                 "layer_point": estimate_layer(direction, min(entry_low, entry_high), max(entry_low, entry_high), sl),
             }
 
-        except Exception:
+        except Exception as exc:
+            if CLAUDE_DEBUG_LOGS:
+                log.warning(f"[claude extract exception] model={model}: {type(exc).__name__}: {exc}")
             continue
 
     return None
 
 def extract_and_format(text: str, source_name: str = "ExposedFX", message_id=None) -> Optional[Dict[str, Any]]:
     if not has_strict_new_signal_requirements(text):
+        if CLAUDE_DEBUG_LOGS:
+            log.info("[extract skipped] strict requirements failed")
         return None
     sig = regex_extract(text) or claude_extract(text)
     if not sig:
+        if CLAUDE_DEBUG_LOGS:
+            log.info("[extract skipped] regex+claude returned none")
         return None
     return {
         "is_signal": True,
