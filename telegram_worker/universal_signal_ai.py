@@ -246,7 +246,7 @@ def has_strict_new_signal_requirements(text: str) -> bool:
     A complete signal needs direction + SL + usable entry/price.
     Split signals are handled by worker_signal_hub before this function.
     """
-    raw = actionable_signal_text(text)
+    raw = preclean_obvious_gold_sl_typos(actionable_signal_text(text))
     t = raw.upper()
 
     if is_trade_management_update(raw):
@@ -493,6 +493,86 @@ def expand_shorthand_price(first: float, second_text: str) -> float:
 
 
 
+def repair_obvious_gold_price_token(token: str, entry_ref: Optional[float] = None) -> Optional[float]:
+    """
+    Repairs extreme one-extra-digit XAU/GOLD typo:
+    44003 -> 4403 when entry is around 4407.
+    Returns None if not safely repairable.
+    """
+    raw = str(token).strip()
+
+    if not re.fullmatch(r"\d{5,6}(?:\.0+)?", raw):
+        return None
+
+    digits = raw.split(".")[0]
+
+    candidates = []
+    for i in range(len(digits)):
+        fixed = digits[:i] + digits[i+1:]
+        if not fixed:
+            continue
+        try:
+            val = float(fixed)
+        except Exception:
+            continue
+        if 1000 <= val <= 9999:
+            candidates.append(val)
+
+    if not candidates:
+        return None
+
+    if entry_ref:
+        near = [x for x in candidates if abs(x - float(entry_ref)) / float(entry_ref) <= 0.08]
+        if near:
+            return min(near, key=lambda x: abs(x - float(entry_ref)))
+        return None
+
+    return candidates[0]
+
+
+def preclean_obvious_gold_sl_typos(text: str) -> str:
+    """
+    Before extraction, fix impossible SL tokens like Sl:44003 when entry is nearby.
+    This prevents the deeper parser from hanging or generating impossible levels.
+    """
+    raw = clean(text)
+    up = raw.upper()
+
+    if "XAU" not in up and "GOLD" not in up:
+        return raw
+
+    # Find rough entry reference from BUY/SELL/LIMIT line.
+    entry_ref = None
+    entry_match = re.search(
+        rf"\b(?:BUY|SELL|BUYS|SELLS|BUYING|SELLING|LONG|SHORT|LIMIT|ENTRY)\b[^\n]{{0,80}}?({PRICE_RE})",
+        up,
+    )
+
+    if entry_match:
+        try:
+            entry_ref = float(entry_match.group(1))
+        except Exception:
+            entry_ref = None
+
+    def repl(m):
+        prefix = m.group(1)
+        token = m.group(2)
+        fixed = repair_obvious_gold_price_token(token, entry_ref)
+        if fixed is None:
+            return m.group(0)
+        log.warning(f"[early sl typo repaired] {token} -> {fixed} text={raw[:80]!r}")
+        return f"{prefix}{fixed:g}"
+
+    repaired = re.sub(
+        r"(\b(?:SL|S/L|STOP\s*LOSS|STOPLOSS|STOP)\b\s*(?:TO|AT|ABOVE|BELOW)?\s*[:@\-]?\s*)(\d{5,6}(?:\.0+)?)\b",
+        repl,
+        raw,
+        flags=re.I,
+    )
+
+    return repaired
+
+
 def extract_sl_distance_units(text: str) -> Optional[float]:
     """
     Supports:
@@ -600,6 +680,11 @@ def repair_obvious_sl_typo(symbol: str, direction: str, entry_low: float, entry_
     # Only repair extreme impossible gold prices.
     if sl < 10000:
         return sl
+
+    early = repair_obvious_gold_price_token(str(int(abs(sl))), (float(entry_low) + float(entry_high)) / 2)
+    if early is not None:
+        log.warning(f"[sl typo repaired fast] {sl} -> {early} text={clean(text)[:80]!r}")
+        return early
 
     raw_int = str(int(abs(sl)))
     candidates = []
@@ -1202,7 +1287,7 @@ def order_type_from_text(text: str, direction: str) -> str:
 
 
 def regex_extract(text: str) -> Optional[Dict[str, Any]]:
-    raw = actionable_signal_text(text)
+    raw = preclean_obvious_gold_sl_typos(actionable_signal_text(text))
 
     if not has_strict_new_signal_requirements(raw):
         return None
@@ -1339,7 +1424,7 @@ def _claude_budget_remaining():
 
 
 def claude_extract(text: str) -> Optional[Dict[str, Any]]:
-    text = actionable_signal_text(text)
+    text = preclean_obvious_gold_sl_typos(actionable_signal_text(text))
     if not has_strict_new_signal_requirements(text):
         return None
     if not (USE_CLAUDE and ANTHROPIC_API_KEY):
@@ -1472,7 +1557,7 @@ def claude_extract(text: str) -> Optional[Dict[str, Any]]:
     return None
 
 def extract_and_format(text: str, source_name: str = "ExposedFX", message_id=None) -> Optional[Dict[str, Any]]:
-    text = actionable_signal_text(text)
+    text = preclean_obvious_gold_sl_typos(actionable_signal_text(text))
     if is_invalidated_trade_notice(text):
         if CLAUDE_DEBUG_LOGS:
             log.info("[extract skipped] invalidated trade notice")
