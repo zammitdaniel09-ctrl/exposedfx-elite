@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import time
+import unicodedata
 from typing import Any, Dict, Optional
 from pathlib import Path
 
@@ -20,6 +21,10 @@ USE_CLAUDE = os.environ.get("USE_CLAUDE_SIGNAL_AI", "1").strip() == "1"
 AUTO_TP_IF_MISSING = os.environ.get("AUTO_TP_IF_MISSING", "1").strip() == "1"
 STRICT_ENTRY_SAFETY = os.environ.get("STRICT_ENTRY_SAFETY", "1").strip() == "1"
 CLAUDE_DEBUG_LOGS = os.environ.get("CLAUDE_DEBUG_LOGS", "1").strip() == "1"
+ENABLE_TEXT_NORMALIZER = os.environ.get("ENABLE_TEXT_NORMALIZER", "1").strip() == "1"
+TEXT_NORMALIZER_DEBUG = os.environ.get("TEXT_NORMALIZER_DEBUG", "1").strip() == "1"
+ENABLE_SIGNAL_SANITY_VALIDATION = os.environ.get("ENABLE_SIGNAL_SANITY_VALIDATION", "1").strip() == "1"
+ENABLE_PRICE_TYPO_REPAIR = os.environ.get("ENABLE_PRICE_TYPO_REPAIR", "1").strip() == "1"
 log = logging.getLogger("universal-signal-ai")
 
 PRICE_RE = r"\d{1,7}(?:\.\d+)?"
@@ -30,14 +35,75 @@ IGNORE_SYMBOLS = {
 }
 
 
-def clean(text: str) -> str:
-    raw = text or ""
+def mojibake_score(value: str) -> int:
+    bad_markers = ("Ã", "Â", "â", "ð", "Ð", "Ø", "Ô", "ƒ", "É", "Ç", "œ", "¢", "�", "\u00ad")
+    return sum(value.count(x) for x in bad_markers)
+
+
+def trade_keyword_score(value: str) -> int:
+    u = value.upper()
+    keywords = (
+        "BUY", "SELL", "GOLD", "XAU", "XAUUSD", "SL", "STOP", "STOPLOSS",
+        "TP", "TARGET", "ENTRY", "ABOVE", "BELOW", "UNDER", "OVER",
+        "PIPS", "HIT", "RISK",
+    )
+    return sum(1 for k in keywords if k in u)
+
+
+def maybe_repair_mojibake(value: str) -> str:
+    if not value:
+        return value
+
+    candidates = [value]
+
+    for enc in ("latin1", "cp1252"):
+        try:
+            repaired = value.encode(enc, errors="ignore").decode("utf-8", errors="ignore")
+            if repaired and repaired not in candidates:
+                candidates.append(repaired)
+        except Exception:
+            pass
+
+    def rank(candidate: str):
+        normal = unicodedata.normalize("NFKC", candidate)
+        return (trade_keyword_score(normal), -mojibake_score(normal), len(normal))
+
+    return max(candidates, key=rank)
+
+
+def normalize_provider_text(value: str) -> str:
+    raw = value or ""
+
     raw = raw.replace("\\n", "\n").replace("\\r", "\n")
-    raw = raw.replace("\u200b", " ").replace("\xa0", " ")
+    raw = raw.replace("\u200b", " ").replace("\xa0", " ").replace("\u00ad", "")
     raw = raw.replace("→", " ").replace("➡", " ").replace("➜", " ")
-    return raw.strip()
+    raw = raw.replace("–", "-").replace("—", "-").replace("_", "-")
+
+    if not ENABLE_TEXT_NORMALIZER:
+        return raw.strip()
+
+    before = raw
+    repaired = maybe_repair_mojibake(raw)
+    normalized = unicodedata.normalize("NFKC", repaired)
+    normalized = normalized.replace("＄", "$")
+    normalized = re.sub(r"[ \t]+", " ", normalized)
+    normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+
+    if TEXT_NORMALIZER_DEBUG and normalized != before:
+        try:
+            log.info(
+                f"[text normalized] before_score={trade_keyword_score(before)} "
+                f"after_score={trade_keyword_score(normalized)} "
+                f"before_bad={mojibake_score(before)} after_bad={mojibake_score(normalized)}"
+            )
+        except Exception:
+            pass
+
+    return normalized.strip()
 
 
+def clean(text: str) -> str:
+    return normalize_provider_text(text)
 
 
 def is_trade_management_update(text: str) -> bool:
@@ -353,6 +419,33 @@ def expand_shorthand_price(first: float, second_text: str) -> float:
 
 
 
+def extract_sl_distance_units(text: str) -> Optional[float]:
+    """
+    Supports:
+    SL 100 PIPS
+    SL: 100-150 PIPS
+    SL 25 POINTS
+    """
+    up = clean(text).upper()
+
+    patterns = [
+        r"\b(?:SL|S/L|STOP\s*LOSS|STOPLOSS|STOP)\b\s*(?:TO|AT)?\s*[:@\-]?\s*(\d+(?:\.\d+)?)(?:\s*(?:-|/|TO)\s*(\d+(?:\.\d+)?))?\s*(PIP|PIPS|POINT|POINTS)\b",
+        r"\b(\d+(?:\.\d+)?)(?:\s*(?:-|/|TO)\s*(\d+(?:\.\d+)?))?\s*(PIP|PIPS|POINT|POINTS)\b[^\n]{0,20}\b(?:SL|STOP)\b",
+    ]
+
+    for pat in patterns:
+        m = re.search(pat, up)
+        if not m:
+            continue
+        try:
+            # Use first value in ranges by default: 100-150 pips -> 100 pips.
+            return float(m.group(1))
+        except Exception:
+            pass
+
+    return None
+
+
 def convert_distance_sl_if_needed(symbol: str, direction: str, entry_mid: float, sl_value: float, text: str) -> float:
     """
     Converts distance-style SL into chart price.
@@ -363,24 +456,16 @@ def convert_distance_sl_if_needed(symbol: str, direction: str, entry_mid: float,
     100 pips = $10
     """
     raw = clean(text)
-    up = raw.upper()
     entry_mid = float(entry_mid)
     sl_value = float(sl_value)
 
-    # If SL is already a chart price close to entry, keep it.
-    if entry_mid and abs(sl_value - entry_mid) / entry_mid < 0.15:
+    distance_units = extract_sl_distance_units(raw)
+
+    if distance_units is None:
+        # If SL is already a chart price close to entry, keep it.
         return sl_value
 
-    sl_distance_match = re.search(
-        r"\b(?:SL|S/L|STOP\s*LOSS|STOPLOSS|STOP)\b\s*(?:TO)?\s*[:@\-]?\s*(\d+(?:\.\d+)?)\s*(PIP|PIPS|POINT|POINTS)\b",
-        up,
-    )
-
-    if not sl_distance_match:
-        return sl_value
-
-    distance_units = float(sl_distance_match.group(1))
-    distance = distance_units * pip_value_for_symbol(symbol)
+    distance = float(distance_units) * pip_value_for_symbol(symbol)
 
     if direction == "BUY":
         return entry_mid - distance
@@ -390,6 +475,166 @@ def invalid_tp_for_direction(direction: str, entry: float, tp: float) -> bool:
     if direction == "BUY":
         return tp <= entry
     return tp >= entry
+
+
+def entry_bounds(entry_low: float, entry_high: float) -> tuple[float, float]:
+    return min(float(entry_low), float(entry_high)), max(float(entry_low), float(entry_high))
+
+
+def validation_entry_ref(direction: str, entry_low: float, entry_high: float) -> float:
+    lo, hi = entry_bounds(entry_low, entry_high)
+    return lo if direction == "BUY" else hi
+
+
+def tp_entry_ref(direction: str, entry_low: float, entry_high: float) -> float:
+    lo, hi = entry_bounds(entry_low, entry_high)
+    return hi if direction == "BUY" else lo
+
+
+def sl_wrong_side(direction: str, entry_low: float, entry_high: float, sl: float) -> bool:
+    lo, hi = entry_bounds(entry_low, entry_high)
+    sl = float(sl)
+    if direction == "BUY":
+        return sl >= lo
+    return sl <= hi
+
+
+def tp_wrong_side(direction: str, entry_low: float, entry_high: float, tp: float) -> bool:
+    lo, hi = entry_bounds(entry_low, entry_high)
+    tp = float(tp)
+    if direction == "BUY":
+        return tp <= hi
+    return tp >= lo
+
+
+def repair_obvious_sl_typo(symbol: str, direction: str, entry_low: float, entry_high: float, sl: float, text: str) -> float:
+    """
+    Repairs obvious extra-digit SL typos, e.g. XAU entry 4407 SL 44003 -> 4403.
+    Does not guess unclear wrong-side SLs like SELL 4486 SL 4300.
+    """
+    if not ENABLE_PRICE_TYPO_REPAIR:
+        return float(sl)
+
+    fam = symbol_family(symbol)
+    sl = float(sl)
+    lo, hi = entry_bounds(entry_low, entry_high)
+    mid = (lo + hi) / 2
+
+    if fam != "GOLD":
+        return sl
+
+    # Only repair extreme impossible gold prices.
+    if sl < 10000:
+        return sl
+
+    raw_int = str(int(abs(sl)))
+    candidates = []
+
+    for i in range(len(raw_int)):
+        fixed = raw_int[:i] + raw_int[i+1:]
+        if not fixed:
+            continue
+        try:
+            candidate = float(fixed)
+        except Exception:
+            continue
+
+        if candidate < 1000:
+            continue
+
+        # Candidate must be near entry and on correct SL side.
+        if mid and abs(candidate - mid) / mid > 0.08:
+            continue
+
+        if direction == "BUY" and candidate < lo:
+            candidates.append(candidate)
+        elif direction == "SELL" and candidate > hi:
+            candidates.append(candidate)
+
+    if not candidates:
+        return sl
+
+    best = min(candidates, key=lambda x: abs(x - mid))
+    log.warning(f"[sl typo repaired] {sl} -> {best} text={clean(text)[:80]!r}")
+    return best
+
+
+def explicit_tp_wrong_side_exists(text: str, symbol: str, direction: str, entry_low: float, entry_high: float) -> bool:
+    """
+    If provider explicitly gives a wrong-side TP, reject instead of silently replacing it.
+    Skips TP pips lines because those are converted separately.
+    """
+    raw = clean(text)
+
+    for line in raw.splitlines():
+        u = line.upper().strip()
+
+        if not re.search(r"\b(?:TP\s*#?\s*\d*|TARGET\s*#?\s*\d*|TAKE\s*PROFIT\s*#?\s*\d*)\b", u):
+            continue
+
+        if "OPEN" in u:
+            continue
+
+        if re.search(r"\b(PIP|PIPS|POINT|POINTS)\b", u):
+            continue
+
+        if re.search(r"\b\d{1,2}:\d{2}\b", u) and not re.search(r"\b\d{3,7}(?:\.\d+)?\b", u):
+            continue
+
+        body = re.sub(r"\b(?:TP\s*#?\s*\d*|TARGET\s*#?\s*\d*|TAKE\s*PROFIT\s*#?\s*\d*)\b", "", u, flags=re.I)
+        nums = re.findall(PRICE_RE, body)
+
+        for n in nums:
+            try:
+                tp = float(n)
+            except Exception:
+                continue
+
+            if not reasonable_tp_price(symbol, tp_entry_ref(direction, entry_low, entry_high), tp):
+                continue
+
+            if tp_wrong_side(direction, entry_low, entry_high, tp):
+                return True
+
+    return False
+
+
+def validate_signal_sanity(symbol: str, direction: str, order_type: str, entry_low: float, entry_high: float, sl: float, tps: list[float], tp_open: bool, text: str) -> bool:
+    if not ENABLE_SIGNAL_SANITY_VALIDATION:
+        return True
+
+    lo, hi = entry_bounds(entry_low, entry_high)
+    mid = (lo + hi) / 2
+    fam = symbol_family(symbol)
+
+    if fam == "GOLD":
+        if lo < 1000 or hi < 1000 or float(sl) < 1000:
+            log.warning(f"[signal sanity rejected] tiny gold price entry={lo}-{hi} sl={sl} text={clean(text)[:100]!r}")
+            return False
+
+    if fam == "FOREX":
+        if hi > 100 or float(sl) > 100:
+            log.warning(f"[signal sanity rejected] impossible forex price entry={lo}-{hi} sl={sl}")
+            return False
+
+    if mid and abs(float(sl) - mid) / mid > 0.25:
+        log.warning(f"[signal sanity rejected] SL too far entry={lo}-{hi} sl={sl} text={clean(text)[:100]!r}")
+        return False
+
+    if sl_wrong_side(direction, lo, hi, sl):
+        log.warning(f"[signal sanity rejected] SL wrong side direction={direction} entry={lo}-{hi} sl={sl} text={clean(text)[:100]!r}")
+        return False
+
+    if explicit_tp_wrong_side_exists(text, symbol, direction, lo, hi):
+        log.warning(f"[signal sanity rejected] explicit TP wrong side direction={direction} entry={lo}-{hi} text={clean(text)[:100]!r}")
+        return False
+
+    for tp in tps or []:
+        if tp_wrong_side(direction, lo, hi, float(tp)):
+            log.warning(f"[signal sanity rejected] TP wrong side direction={direction} entry={lo}-{hi} tp={tp}")
+            return False
+
+    return True
 
 
 def risk_from_text(text: str, symbol: str, entry: float, sl: float) -> str:
@@ -902,10 +1147,26 @@ def regex_extract(text: str) -> Optional[Dict[str, Any]]:
         return None
 
     entry = normalise_xau_shorthand_entry_with_sl(symbol, direction, entry, sl)
-    mid = (float(entry[0]) + float(entry[1])) / 2
+
+    entry_low = float(entry[0])
+    entry_high = float(entry[1])
+    mid = (entry_low + entry_high) / 2
+
+    order_type = order_type_from_text(raw, direction)
+
     sl = convert_distance_sl_if_needed(symbol, direction, mid, sl, raw)
+    sl = repair_obvious_sl_typo(symbol, direction, entry_low, entry_high, sl, raw)
 
-    tps, tp_open = extract_tps_contextual(raw, symbol, direction, mid)
+    tp_ref = tp_entry_ref(direction, entry_low, entry_high)
+    tps, tp_open = extract_tps_contextual(raw, symbol, direction, tp_ref)
+
+    if not tps and not tp_open:
+        if AUTO_TP_IF_MISSING:
+            tp_open = True
+        else:
+            return None
+
+    tps = [tp for tp in tps if not invalid_tp_for_direction(direction, tp_ref, float(tp))]
 
     if not tps and not tp_open:
         if AUTO_TP_IF_MISSING:
@@ -913,26 +1174,21 @@ def regex_extract(text: str) -> Optional[Dict[str, Any]]:
         else:
             return None
 
-    tps = [tp for tp in tps if not invalid_tp_for_direction(direction, mid, float(tp))]
-
-    if not tps and not tp_open:
-        if AUTO_TP_IF_MISSING:
-            tp_open = True
-        else:
-            return None
+    if not validate_signal_sanity(symbol, direction, order_type, entry_low, entry_high, sl, tps, tp_open, raw):
+        return None
 
     return {
         "is_signal": True,
         "symbol": symbol,
         "direction": direction,
-        "order_type": order_type_from_text(raw, direction),
-        "entry_low": float(entry[0]),
-        "entry_high": float(entry[1]),
+        "order_type": order_type,
+        "entry_low": entry_low,
+        "entry_high": entry_high,
         "sl": float(sl),
-        "tps": estimate_tps(symbol, direction, mid, sl, tps, tp_open),
+        "tps": estimate_tps(symbol, direction, tp_ref, sl, tps, tp_open),
         "tp_open": True,
         "risk": risk_from_text(raw, symbol, mid, sl),
-        "layer_point": estimate_layer(direction, float(entry[0]), float(entry[1]), sl),
+        "layer_point": estimate_layer(direction, entry_low, entry_high, sl),
     }
 
 def parse_jsonish(value: str) -> Optional[Dict[str, Any]]:
@@ -1087,7 +1343,12 @@ def claude_extract(text: str) -> Optional[Dict[str, Any]]:
                 except Exception:
                     pass
 
-            regex_tps, regex_open = extract_tps_contextual(text, symbol, direction, (entry_low + entry_high) / 2)
+            entry_low = min(entry_low, entry_high)
+            entry_high = max(entry_low, entry_high)
+            mid = (entry_low + entry_high) / 2
+            tp_ref = tp_entry_ref(direction, entry_low, entry_high)
+
+            regex_tps, regex_open = extract_tps_contextual(text, symbol, direction, tp_ref)
             if regex_tps:
                 tps = regex_tps
 
@@ -1099,9 +1360,14 @@ def claude_extract(text: str) -> Optional[Dict[str, Any]]:
                 else:
                     continue
 
-            mid = (entry_low + entry_high) / 2
             sl = convert_distance_sl_if_needed(symbol, direction, mid, sl, text)
-            tps = [tp for tp in tps if not invalid_tp_for_direction(direction, mid, float(tp))]
+            sl = repair_obvious_sl_typo(symbol, direction, entry_low, entry_high, sl, text)
+            tps = [tp for tp in tps if not invalid_tp_for_direction(direction, tp_ref, float(tp))]
+
+            order_type = str(obj.get("order_type") or order_type_from_text(text, direction)).upper()
+
+            if not validate_signal_sanity(symbol, direction, order_type, entry_low, entry_high, sl, tps, tp_open, text):
+                continue
 
             explicit_risk = str(obj.get("risk", "")).upper()
             if explicit_risk in ("LOW", "MEDIUM", "HIGH") and any(x in clean(text).upper() for x in ("LOW RISK", "MEDIUM RISK", "HIGH RISK", "HIGHER RISK", "VERY HIGH", "RISKY")):
@@ -1113,14 +1379,14 @@ def claude_extract(text: str) -> Optional[Dict[str, Any]]:
                 "is_signal": True,
                 "symbol": symbol,
                 "direction": direction,
-                "order_type": str(obj.get("order_type") or order_type_from_text(text, direction)).upper(),
-                "entry_low": min(entry_low, entry_high),
-                "entry_high": max(entry_low, entry_high),
+                "order_type": order_type,
+                "entry_low": entry_low,
+                "entry_high": entry_high,
                 "sl": sl,
-                "tps": estimate_tps(symbol, direction, mid, sl, tps, tp_open),
+                "tps": estimate_tps(symbol, direction, tp_ref, sl, tps, tp_open),
                 "tp_open": True,
                 "risk": risk,
-                "layer_point": estimate_layer(direction, min(entry_low, entry_high), max(entry_low, entry_high), sl),
+                "layer_point": estimate_layer(direction, entry_low, entry_high, sl),
             }
 
         except Exception as exc:
