@@ -88,6 +88,7 @@ ALLOWED_SOURCE_TOPICS = topic_set_from_env("ALLOWED_SOURCE_TOPICS", DEFAULT_ALLO
 CONTENT_DEDUPE_ENABLED = os.environ.get("CONTENT_DEDUPE_ENABLED", "0").strip() == "1"
 SIGNAL_SEND_RETRY_ATTEMPTS = int(os.environ.get("SIGNAL_SEND_RETRY_ATTEMPTS", "2"))
 SIGNAL_SEND_RETRY_SLEEP_CAP_SECONDS = int(os.environ.get("SIGNAL_SEND_RETRY_SLEEP_CAP_SECONDS", "120"))
+AI_FORMATTED_SIGNAL_WITH_MEDIA = os.environ.get("AI_FORMATTED_SIGNAL_WITH_MEDIA", "1").strip() == "1"
 UPDATE_REPLY_DEDUPE_SECONDS = int(os.environ.get("UPDATE_REPLY_DEDUPE_SECONDS", "21600"))
 SIGNAL_LIFECYCLE_FILE = DATA_DIR / "signal_lifecycle.json"
 
@@ -1640,6 +1641,56 @@ def signature_for(result, key, source_msg_id=None):
     return hashlib.sha256(base.encode("utf-8", errors="ignore")).hexdigest()
 
 
+def is_real_signal_media(message):
+    media = getattr(message, "media", None)
+    if not media:
+        return False
+
+    # Avoid treating webpage previews as real signal screenshots.
+    if media.__class__.__name__ == "MessageMediaWebPage":
+        return False
+
+    return True
+
+
+async def send_ai_formatted_signal(message, result, reply_to_id):
+    """
+    If the provider signal has a real image/video/document attached,
+    send the AI formatted signal as a media message with the custom HTML caption.
+    This keeps the screenshot + animated tg-emoji/custom formatted message together.
+    """
+    formatted = result["message"]
+
+    if AI_FORMATTED_SIGNAL_WITH_MEDIA and is_real_signal_media(message):
+        try:
+            sent = await client.send_file(
+                SIGNAL_DEST_CHAT,
+                message.media,
+                caption=formatted,
+                parse_mode="html",
+                link_preview=False,
+                reply_to=reply_to_id,
+            )
+            log.info(f"[signal hub ai media sent] source_msg={getattr(message, 'id', None)} ai_msg={getattr(sent, 'id', None)}")
+            return sent
+
+        except Exception as exc:
+            log.warning(
+                f"[signal hub ai media send failed] source_msg={getattr(message, 'id', None)} "
+                f"falling back to text AI message: {type(exc).__name__}: {exc}"
+            )
+
+    sent = await send_message_with_retry(
+        SIGNAL_DEST_CHAT,
+        formatted,
+        parse_mode="html",
+        link_preview=False,
+        reply_to=reply_to_id,
+    )
+
+    return sent
+
+
 async def forward_original(message, text):
     """
     Forward/copy the original and return the sent message,
@@ -1757,13 +1808,7 @@ async def send_full_signal(message, result, key, original_text, forward_raw=True
 
         reply_to_id = getattr(original_sent, "id", None)
 
-        ai_sent = await send_message_with_retry(
-            SIGNAL_DEST_CHAT,
-            result["message"],
-            parse_mode="html",
-            link_preview=False,
-            reply_to=reply_to_id,
-        )
+        ai_sent = await send_ai_formatted_signal(message, result, reply_to_id)
         sent_messages.append(ai_sent)
 
         if SEND_SOURCE_LINE:
@@ -2003,6 +2048,8 @@ async def main():
     log.info("Lifecycle pip enrichment active: True")
     log.info("Broad update phrase reinforcement active: True")
     log.info("Ultra update variation phrase bank active: True")
+    log.info(f"AI_FORMATTED_SIGNAL_WITH_MEDIA={AI_FORMATTED_SIGNAL_WITH_MEDIA}")
+    log.info("AI formatted media signal active: True")
     log.info("Signal lifecycle tracking active: True")
     log.info("Provider profiles active: True")
     log.info("Promo filter active: True")

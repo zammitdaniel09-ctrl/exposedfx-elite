@@ -225,25 +225,119 @@ def remember_dedupe(route, message, text):
     save_dedupe()
 
 
-def existing_destination_id(message, route):
-    key = map_key(route["source_chat"], message.id, route["dest_chat"], route["dest_topic"])
-    mapped = message_map.get(key)
+def mapped_ids_from_value(value):
+    """
+    Message map compatibility:
+    old format = int
+    reinforced format = list[int]
+    accidental dict/list values are also handled safely.
+    """
+    if not value:
+        return []
+
+    if isinstance(value, list):
+        out = []
+        for x in value:
+            try:
+                out.append(int(x))
+            except Exception:
+                pass
+        return out
+
+    if isinstance(value, dict):
+        out = []
+        for x in value.values():
+            try:
+                out.append(int(x))
+            except Exception:
+                pass
+        return out
+
     try:
-        return int(mapped) if mapped else None
+        return [int(value)]
     except Exception:
-        return None
+        return []
+
+
+def existing_destination_id(message, route):
+    ids = existing_destination_ids(message, route)
+    return ids[0] if ids else None
+
+
+def existing_destination_ids(message, route):
+    key = map_key(route["source_chat"], message.id, route["dest_chat"], route["dest_topic"])
+    return mapped_ids_from_value(message_map.get(key))
+
+
+def all_existing_destination_ids_for_source(message, route):
+    """
+    Strong edit cleanup:
+    - exact key match
+    - scan old map keys for same source chat + source msg id + same destination
+    This protects against topic/fallback route changes between original and edit.
+    """
+    wanted_source = str(route["source_chat"])
+    wanted_msg = str(message.id)
+    wanted_dest_chat = str(route["dest_chat"])
+    wanted_dest_topic = str(route["dest_topic"])
+
+    ids = []
+    keys_to_remove = set()
+
+    exact_key = map_key(route["source_chat"], message.id, route["dest_chat"], route["dest_topic"])
+
+    for key, value in list(message_map.items()):
+        try:
+            parts = str(key).split(":")
+            if len(parts) != 4:
+                continue
+
+            source_chat, source_msg_id, dest_chat, dest_topic = parts
+
+            same_source_msg = source_chat == wanted_source and source_msg_id == wanted_msg
+            same_dest = dest_chat == wanted_dest_chat and dest_topic == wanted_dest_topic
+
+            if key == exact_key or (same_source_msg and same_dest):
+                ids.extend(mapped_ids_from_value(value))
+                keys_to_remove.add(key)
+
+        except Exception:
+            continue
+
+    clean_ids = []
+    for mid in ids:
+        if mid and mid not in clean_ids:
+            clean_ids.append(mid)
+
+    return clean_ids, keys_to_remove
 
 
 async def delete_existing_destination(message, route):
-    existing = existing_destination_id(message, route)
-    if not existing:
+    ids, keys_to_remove = all_existing_destination_ids_for_source(message, route)
+
+    if not ids:
+        log.info(f"[edited cleanup] no previous mapped copy source={getattr(message, 'id', None)} route={route['name']}")
         return False
+
     try:
-        await client.delete_messages(route["dest_chat"], existing)
-        log.info(f"[edited cleanup] deleted old forwarded msg {existing} for source {message.id}")
+        await client.delete_messages(route["dest_chat"], ids)
+
+        for key in keys_to_remove:
+            message_map.pop(key, None)
+
+        save_map()
+
+        log.info(
+            f"[edited cleanup] deleted old forwarded msgs {ids} "
+            f"for source={message.id} route={route['name']}"
+        )
         return True
+
     except Exception as exc:
-        log.warning(f"[edited cleanup failed] source={message.id} dest_msg={existing}: {exc}")
+        log.warning(
+            f"[edited cleanup failed] source={message.id} route={route['name']} "
+            f"dest_msgs={ids}: {exc}"
+        )
         return False
 
 
@@ -510,9 +604,25 @@ def reply_target(message, route):
 def remember_message(src_msg, dst_msg, route):
     if not src_msg or not dst_msg:
         return
+
     key = map_key(route["source_chat"], src_msg.id, route["dest_chat"], route["dest_topic"])
-    message_map[key] = dst_msg.id
-    save_map()
+
+    if isinstance(dst_msg, list):
+        ids = []
+        for item in dst_msg:
+            mid = getattr(item, "id", None)
+            if mid:
+                ids.append(int(mid))
+
+        if ids:
+            message_map[key] = ids[0] if len(ids) == 1 else ids
+            save_map()
+        return
+
+    mid = getattr(dst_msg, "id", None)
+    if mid:
+        message_map[key] = int(mid)
+        save_map()
 
 
 def log_stats(route, message, text):
@@ -874,7 +984,7 @@ async def handle_single_message(event, edited=False):
         log.info(f"[promo blocked incoming] msg={getattr(message, 'id', None)} topic={topic_id}")
         return
 
-    if getattr(message, "grouped_id", None) and not PROCESS_GROUPED_MESSAGES_IN_NEW_HANDLER:
+    if getattr(message, "grouped_id", None) and not PROCESS_GROUPED_MESSAGES_IN_NEW_HANDLER and not edited:
         return
 
     routes = routes_for(chat_id, topic_id, message)
@@ -1028,6 +1138,7 @@ async def main():
     log.info(f"COPY_RETRY_ATTEMPTS={COPY_RETRY_ATTEMPTS}")
     log.info(f"COPY_RETRY_SLEEP_CAP_SECONDS={COPY_RETRY_SLEEP_CAP_SECONDS}")
     log.info("Exact media/reply copy hardening active: True")
+    log.info("Strong edited-message cleanup active: True")
     log.info("Imperium fixed Telegram worker running...")
     asyncio.create_task(stats.loop(client))
     log.info("Weekly stats reporter running for Sunday 00:00 Europe/Malta")
