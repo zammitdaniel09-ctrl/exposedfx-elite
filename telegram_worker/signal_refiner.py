@@ -151,6 +151,11 @@ def symbol_family(symbol: str) -> str:
 
 
 def auto_risk(symbol: str, direction: str, entry_low: float, entry_high: float, sl: float) -> str:
+    """
+    Practical trade risk:
+    tighter stop = HIGH risk because normal noise can hit SL easier.
+    wider stop = LOW risk because the setup has more breathing room.
+    """
     lo = float(entry_low)
     hi = float(entry_high)
     stop = float(sl)
@@ -161,34 +166,38 @@ def auto_risk(symbol: str, direction: str, entry_low: float, entry_high: float, 
 
     if fam == "GOLD":
         if distance <= 8:
-            return "LOW"
+            return "HIGH"
         if distance <= 18:
             return "MEDIUM"
-        return "HIGH"
+        return "LOW"
+
     if fam == "CRYPTO":
         if pct <= 0.003:
-            return "LOW"
+            return "HIGH"
         if pct <= 0.008:
             return "MEDIUM"
-        return "HIGH"
+        return "LOW"
+
     if fam == "INDEX":
         if pct <= 0.0025:
-            return "LOW"
+            return "HIGH"
         if pct <= 0.006:
             return "MEDIUM"
-        return "HIGH"
+        return "LOW"
+
     if fam == "FOREX":
         if pct <= 0.0015:
-            return "LOW"
+            return "HIGH"
         if pct <= 0.005:
             return "MEDIUM"
-        return "HIGH"
+        return "LOW"
 
     if pct <= 0.003:
-        return "LOW"
+        return "HIGH"
     if pct <= 0.007:
         return "MEDIUM"
-    return "HIGH"
+    return "LOW"
+
 
 
 def risk_icon(risk: str) -> str:
@@ -210,6 +219,35 @@ def estimated_layer(direction: str, entry_low: float, entry_high: float, sl: flo
     return (entry + stop) / 2
 
 
+def order_type_from_text(text: str, direction: str) -> str:
+    t = clean_text(text).upper()
+
+    if direction == "SELL":
+        if re.search(r"\b(SELL|SELLS|SELLING|SHORT|SHORTS|SHORTING)\b[^\n]{0,50}\b(BELOW|UNDER)\b", t):
+            return "SELL_STOP"
+        if re.search(r"\bSELL\s+STOP\b", t):
+            return "SELL_STOP"
+        if re.search(r"\b(?:BREAK|BREAKS|BROKE|BREAKOUT|IF\s+BREAKS?)\b[^\n]{0,20}\b(BELOW|UNDER)\b", t):
+            return "SELL_STOP"
+        if re.search(rf"\b(BELOW|UNDER)\s+[0-9]{{1,7}}(?:\.\d+)?\b[^\n]{{0,50}}\b(SELL|SELLS|SHORT|SHORTS)\b", t):
+            return "SELL_STOP"
+
+    if direction == "BUY":
+        if re.search(r"\b(BUY|BUYS|BUYING|LONG|LONGS|LONGING)\b[^\n]{0,50}\b(ABOVE|OVER)\b", t):
+            return "BUY_STOP"
+        if re.search(r"\bBUY\s+STOP\b", t):
+            return "BUY_STOP"
+        if re.search(r"\b(?:BREAK|BREAKS|BROKE|BREAKOUT|IF\s+BREAKS?)\b[^\n]{0,20}\b(ABOVE|OVER)\b", t):
+            return "BUY_STOP"
+        if re.search(rf"\b(ABOVE|OVER)\s+[0-9]{{1,7}}(?:\.\d+)?\b[^\n]{{0,50}}\b(BUY|BUYS|LONG|LONGS)\b", t):
+            return "BUY_STOP"
+
+    if re.search(r"\b(BUY|SELL)\s+LIMIT\b", t):
+        return "LIMIT"
+
+    return "MARKET_OR_ZONE"
+
+
 def local_parse(text: str) -> Optional[Dict[str, Any]]:
     if is_hybrid_signal(text):
         return None
@@ -220,10 +258,13 @@ def local_parse(text: str) -> Optional[Dict[str, Any]]:
     tps = all_tps(text, parsed)
     if not tps:
         return None
+    direction = str(parsed["direction"]).upper()
+
     return {
         "is_signal": True,
         "symbol": parsed["symbol"],
-        "direction": parsed["direction"],
+        "direction": direction,
+        "order_type": str(parsed.get("order_type") or order_type_from_text(text, direction)).upper(),
         "entry_low": float(parsed["entry_low"]),
         "entry_high": float(parsed["entry_high"]),
         "sl": float(parsed["sl"]),
@@ -248,8 +289,8 @@ def claude_parse(text: str) -> Optional[Dict[str, Any]]:
         "Normalize symbols but do not force all symbols to XAUUSD. GOLD/XAU/XAUUSD should become XAUUSD. BTC should become BTCUSD. "
         "For entry zones, set entry_low to the lower price and entry_high to the higher price. For a single entry, both should equal the same number. "
         "If TP is open, return tps as an empty array and tp_open as true. "
-        "Return exactly these keys: is_signal, symbol, direction, entry_low, entry_high, sl, tps, tp_open, risk. "
-        "direction must be BUY or SELL. tps must be an array of numeric take profits in order. risk can be LOW, MEDIUM, HIGH, or empty."
+        "Return exactly these keys: is_signal, symbol, direction, order_type, entry_low, entry_high, sl, tps, tp_open, risk. "
+        "direction must be BUY or SELL. order_type must be SELL_STOP, BUY_STOP, LIMIT, or MARKET_OR_ZONE. tps must be an array of numeric take profits in order. risk can be LOW, MEDIUM, HIGH, or empty."
     )
 
     try:
@@ -290,6 +331,7 @@ def claude_parse(text: str) -> Optional[Dict[str, Any]]:
             "is_signal": True,
             "symbol": symbol,
             "direction": direction,
+            "order_type": str(obj.get("order_type") or order_type_from_text(text, direction)).upper(),
             "entry_low": min(entry_low, entry_high),
             "entry_high": max(entry_low, entry_high),
             "sl": sl,
