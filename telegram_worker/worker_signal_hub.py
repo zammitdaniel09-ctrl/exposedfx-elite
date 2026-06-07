@@ -66,15 +66,64 @@ ALLOWED_SOURCE_TOPICS = topic_set_from_env("ALLOWED_SOURCE_TOPICS", DEFAULT_ALLO
 CONTENT_DEDUPE_ENABLED = os.environ.get("CONTENT_DEDUPE_ENABLED", "0").strip() == "1"
 SIGNAL_SEND_RETRY_ATTEMPTS = int(os.environ.get("SIGNAL_SEND_RETRY_ATTEMPTS", "2"))
 SIGNAL_SEND_RETRY_SLEEP_CAP_SECONDS = int(os.environ.get("SIGNAL_SEND_RETRY_SLEEP_CAP_SECONDS", "120"))
+UPDATE_REPLY_DEDUPE_SECONDS = int(os.environ.get("UPDATE_REPLY_DEDUPE_SECONDS", "21600"))
+SIGNAL_LIFECYCLE_FILE = DATA_DIR / "signal_lifecycle.json"
 
 buffers = defaultdict(lambda: deque(maxlen=BUFFER_MAX_MESSAGES))
 sent_signatures = deque(maxlen=300)
 sent_signature_set = set()
 sent_content_signatures = deque(maxlen=600)
 sent_content_signature_set = set()
+update_reply_dedupe = {}
 last_signal_context = {}
-active_signal_lifecycle = {}
-last_active_signal_by_topic = {}
+
+
+def load_signal_lifecycle():
+    try:
+        if SIGNAL_LIFECYCLE_FILE.exists():
+            data = json.loads(SIGNAL_LIFECYCLE_FILE.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+    except Exception as exc:
+        log.warning(f"[lifecycle load failed] {exc}")
+    return {}
+
+
+def save_signal_lifecycle():
+    try:
+        tmp = SIGNAL_LIFECYCLE_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(active_signal_lifecycle, default=str), encoding="utf-8")
+        tmp.replace(SIGNAL_LIFECYCLE_FILE)
+    except Exception as exc:
+        log.warning(f"[lifecycle save failed] {exc}")
+
+
+def rebuild_last_active_signal_by_topic(lifecycle):
+    out = {}
+
+    try:
+        records = list(lifecycle.values())
+    except Exception:
+        return out
+
+    records.sort(key=lambda r: float(r.get("last_update_ts") or r.get("created_ts") or 0))
+
+    for rec in records:
+        try:
+            topic = int(rec.get("topic"))
+        except Exception:
+            continue
+
+        status = str(rec.get("status") or "").upper()
+        if status in ("CANCELLED", "SL_HIT", "CLOSED", "CLOSED_MANUAL"):
+            continue
+
+        out[topic] = rec
+
+    return out
+
+
+active_signal_lifecycle = load_signal_lifecycle()
+last_active_signal_by_topic = rebuild_last_active_signal_by_topic(active_signal_lifecycle)
 
 TOPIC_NAMES = {
     2: "Triad FX",
@@ -226,67 +275,222 @@ def packet_for_reply_source(message, key):
     return None, []
 
 
-def format_signal_update_text(text):
+def has_next_trade_context(text: str) -> bool:
+    t = (text or "").upper()
+    return bool(re.search(
+        r"\b(GO\s+IN\s+TO\s+THE\s+NEXT\s+TRADE|GO\s+INTO\s+THE\s+NEXT\s+TRADE|NEXT\s+TRADE|NEW\s+TRADE|NEXT\s+SETUP|NEW\s+SETUP)\b",
+        t,
+    ))
+
+
+def looks_like_new_setup_inside_update(text: str) -> bool:
+    t = (text or "").upper()
+    has_direction = bool(re.search(r"\b(BUY|SELL|BUYS|SELLS|BUYING|SELLING|LONG|SHORT)\b", t))
+    has_sl = bool(re.search(r"\b(SL|S/L|STOP|STOPLOSS|STOP\s*LOSS)\b\s*[:@\-]?\s*\d", t))
+    has_price = bool(re.search(r"\b\d{3,7}(?:\.\d+)?\b", t))
+    return has_direction and has_sl and has_price
+
+
+def clean_update_body(text: str) -> str:
     raw = (text or "").strip()
+    raw = raw.replace("\\n", "\n").replace("\\r", "\n")
+    raw = re.sub(r"[ \t]+", " ", raw)
+    return raw.strip()
+
+
+def extract_update_pips(text: str):
+    t = (text or "").upper()
+    matches = re.findall(r"([+-]?\s*\d{1,5}(?:\.\d+)?)\s*(?:PIP|PIPS)\b", t)
+    out = []
+    for m in matches:
+        value = m.replace(" ", "")
+        if not value.startswith(("+", "-")):
+            value = "+" + value
+        out.append(value)
+    return out
+
+
+def extract_update_tp_nums(text: str):
+    t = (text or "").upper()
+    nums = []
+
+    patterns = [
+        r"\bTP\s*#?\s*(\d{1,2})\b[^\n]{0,30}\b(HIT|DONE|SMASHED|CLEANED|REACHED|TOUCHED)\b",
+        r"\b(HIT|DONE|SMASHED|CLEANED|REACHED|TOUCHED)\b[^\n]{0,30}\bTP\s*#?\s*(\d{1,2})\b",
+        r"\bTARGET\s*#?\s*(\d{1,2})\b[^\n]{0,30}\b(HIT|DONE|REACHED|TOUCHED)\b",
+        r"\b(?:FIRST|1ST)\s+(?:TP|TARGET)\b",
+        r"\b(?:SECOND|2ND)\s+(?:TP|TARGET)\b",
+        r"\b(?:THIRD|3RD)\s+(?:TP|TARGET)\b",
+    ]
+
+    for pat in patterns[:3]:
+        for m in re.findall(pat, t):
+            if isinstance(m, tuple):
+                for item in m:
+                    if str(item).isdigit():
+                        nums.append(str(item))
+            elif str(m).isdigit():
+                nums.append(str(m))
+
+    if re.search(patterns[3], t):
+        nums.append("1")
+    if re.search(patterns[4], t):
+        nums.append("2")
+    if re.search(patterns[5], t):
+        nums.append("3")
+
+    unique = []
+    for n in nums:
+        if n not in unique:
+            unique.append(n)
+
+    return unique
+
+
+def classify_signal_update_text(text):
+    raw = clean_update_body(text)
     if not raw:
         return None
 
     t = raw.upper()
+    low = raw.lower()
 
-    # Avoid new setups or recaps.
-    has_new_setup = bool(re.search(r"\b(BUY|SELL|LONG|SHORT)\b", t)) and bool(re.search(r"\b(SL|STOP|STOPLOSS|STOP\s*LOSS)\b\s*[:\-]?\s*\d", t))
+    # Important: if provider says old trade hit SL then gives next trade,
+    # do NOT treat it as an update. Let extractor parse the next setup.
+    if has_next_trade_context(raw) and looks_like_new_setup_inside_update(raw):
+        return None
+
+    # Avoid fresh setups/recaps/promos.
+    has_new_setup = bool(re.search(r"\b(BUY|SELL|LONG|SHORT)\b", t)) and bool(re.search(r"\b(SL|STOP|STOPLOSS|STOP\s*LOSS)\b\s*[:@\-]?\s*\d", t))
     if has_new_setup:
         return None
 
     blocked = [
-        "ENDED WITH",
         "DAILY RECAP",
         "WEEKLY RECAP",
         "RESULTS",
-        "OVER ",
-        "TOTAL",
-        "TODAY",
         "ALL TRADES",
         "CLIENT",
-        "VIP",
         "INSTAGRAM",
+        "FREE LIFE",
+        "EBOOK",
+        "SCHOOL",
+        "MT5 GUIDE",
+        "CLICK WHAT YOU NEED",
     ]
+
     if any(x in t for x in blocked):
         return None
 
-    pip_matches = re.findall(r"([+-]?\s*\d{1,5}(?:\.\d+)?)\s*(?:PIP|PIPS)\b", t)
-    pip_values = [p.replace(" ", "").replace("+", "") for p in pip_matches]
+    pips = extract_update_pips(raw)
+    pips_part = pips[0] if len(pips) == 1 else None
 
-    # Avoid R1/R2 multi-line recaps.
-    if len(pip_values) > 1:
-        return None
+    # Cancel / invalid / remove pending
+    if re.search(r"\b(CANCEL|CANCELLED|INVALID|REMOVE|REMOVED|DELETE|DELETED|NO\s+TRADE|DON'?T\s+ENTER|DO\s+NOT\s+ENTER)\b", t):
+        return {
+            "type": "CANCEL",
+            "status": "CANCELLED",
+            "text": "<b>SIGNAL CANCELLED / REMOVED 💎</b>",
+        }
 
-    tp_nums = []
-    if re.search(r"\b(HIT|DONE|SLAP+ED|SMASHED|CLEANED)\b", t):
-        tp_nums = re.findall(r"\bTP\s*#?\s*(\d{1,2})\b", t)
+    # Stop loss hit
+    if re.search(r"\b(SL\s+HIT|HIT\s+SL|STOPLOSS\s+HIT|STOP\s*LOSS\s+HIT|HIT\s+STOPLOSS|HIT\s+STOP\s*LOSS|STOP\s+PRESO|STOPPED\s+OUT)\b", t):
+        extra = f" {pips_part}" if pips_part else ""
+        return {
+            "type": "SL_HIT",
+            "status": "SL_HIT",
+            "text": f"<b>STOP LOSS HIT{extra} ❌</b>",
+        }
 
-    # If it only says "100 pips" as a direct reply to known signal, allow it.
-    pip_part = None
-    if pip_values:
-        value = pip_values[0]
-        pip_part = f"+{value}PIPS"
+    # Breakeven hit
+    if re.search(r"\b(BE\s+HIT|BREAKEVEN\s+HIT|BREAK\s*EVEN\s+HIT|HIT\s+BE)\b", t):
+        return {
+            "type": "BE_HIT",
+            "status": "BREAKEVEN_HIT",
+            "text": "<b>BREAKEVEN HIT 💎</b>",
+        }
 
-    tp_part = None
+    # Move SL / protect
+    m = re.search(r"\b(?:MOVE|MOVED|CHANGE|CHANGED|UPDATE|UPDATED|SET)\s+(?:YOUR\s+)?(?:SL|S/L|STOP|STOPLOSS|STOP\s*LOSS)\s*(?:TO|AT)?\s*[:@\-]?\s*(BE|BREAKEVEN|BREAK\s*EVEN|ENTRY|ENTRIES|\d{1,7}(?:\.\d+)?)\b", t)
+    if not m:
+        m = re.search(r"\b(?:SL|S/L|STOP|STOPLOSS|STOP\s*LOSS)\s*(?:TO|AT|MOVED\s+TO|UPDATED\s+TO)\s*[:@\-]?\s*(BE|BREAKEVEN|BREAK\s*EVEN|ENTRY|ENTRIES|\d{1,7}(?:\.\d+)?)\b", t)
+
+    if m:
+        target = m.group(1).replace("BREAK EVEN", "BREAKEVEN")
+        if target in ("BE", "BREAKEVEN", "ENTRY", "ENTRIES"):
+            return {
+                "type": "MOVE_SL",
+                "status": "SL_TO_BE",
+                "text": "<b>SL MOVED TO BREAKEVEN 💎</b>",
+            }
+        return {
+            "type": "MOVE_SL",
+            "status": "SL_UPDATED",
+            "price": target,
+            "text": f"<b>SL UPDATED TO {target} 💎</b>",
+        }
+
+    # Entry activated / order triggered
+    if re.search(r"\b(ACTIVATED|ENTRY\s+HIT|ENTRY\s+TRIGGERED|TRIGGERED|ORDER\s+FILLED|ENTERED)\b", t):
+        return {
+            "type": "ENTRY_TRIGGERED",
+            "status": "ENTRY_TRIGGERED",
+            "text": "<b>ENTRY TRIGGERED 💎</b>",
+        }
+
+    # Close / secure trade
+    if re.search(r"\b(CLOSE\s+NOW|CLOSE\s+TRADE|CLOSE\s+FULL|CLOSE\s+ALL|MANUALLY\s+CLOSE|TAKE\s+PROFIT\s+NOW)\b", t):
+        extra = f" {pips_part}" if pips_part else ""
+        return {
+            "type": "CLOSE",
+            "status": "CLOSED_MANUAL",
+            "text": f"<b>CLOSE TRADE NOW{extra} 💎</b>",
+        }
+
+    # Partial close / secure partial
+    if re.search(r"\b(PARTIAL|PARTIALS|CLOSE\s+HALF|CLOSE\s+50|SECURE\s+SOME|TAKE\s+SOME|TAKE\s+PARTIAL|TAKE\s+PROFIT\s+PARTIAL)\b", t):
+        extra = f" {pips_part}" if pips_part else ""
+        return {
+            "type": "PARTIAL",
+            "status": "PARTIAL_PROFIT",
+            "text": f"<b>PARTIAL PROFITS SECURED{extra} 💎</b>",
+        }
+
+    # TP hit / target hit
+    tp_nums = extract_update_tp_nums(raw)
     if tp_nums:
-        unique = []
-        for n in tp_nums:
-            if n not in unique:
-                unique.append(n)
-        tp_part = " ".join(f"TP{n}" for n in unique) + " HIT"
+        tp_part = " ".join(f"TP{n}" for n in tp_nums) + " HIT"
+        extra = f" {pips_part}" if pips_part else ""
+        return {
+            "type": "TP_HIT",
+            "status": "TP_HIT",
+            "text": f"<b>{tp_part}{extra} 💎</b>",
+        }
 
-    if not pip_part and not tp_part:
+    # Pips-only running profit
+    if pips_part:
+        return {
+            "type": "PIPS",
+            "status": "RUNNING_PROFIT",
+            "text": f"<b>{pips_part}PIPS 💎</b>",
+        }
+
+    # Hold / running
+    if re.search(r"\b(HOLD|HOLDING|RUNNING|STILL\s+RUNNING|LET\s+IT\s+RUN|KEEP\s+RUNNING|RUNNER)\b", t):
+        return {
+            "type": "RUNNING",
+            "status": "RUNNING",
+            "text": "<b>TRADE STILL RUNNING 💎</b>",
+        }
+
+    return None
+
+
+def format_signal_update_text(text):
+    update = classify_signal_update_text(text)
+    if not update:
         return None
-
-    if tp_part and pip_part:
-        return f"<b>{tp_part} {pip_part} 💎</b>"
-    if tp_part:
-        return f"<b>{tp_part} 💎</b>"
-    return f"<b>{pip_part} 💎</b>"
+    return update.get("text")
 
 
 async def maybe_send_signal_update_reply(message, key, text):
@@ -299,6 +503,10 @@ async def maybe_send_signal_update_reply(message, key, text):
         return False
 
     ai_msg_id = packet_ids[1]
+
+    if should_skip_duplicate_update_reply(key, ai_msg_id, update_text):
+        log.info(f"[signal update skipped] duplicate legacy update key={key} ai_msg={ai_msg_id} text={update_text}")
+        return True
 
     sent = await send_message_with_retry(
         SIGNAL_DEST_CHAT,
@@ -391,11 +599,7 @@ def remember_lifecycle(message, key, result, sent_messages):
     active_signal_lifecycle[lifecycle_key_for(message, key)] = rec
     last_active_signal_by_topic[int(key)] = rec
 
-    try:
-        path = DATA_DIR / "signal_lifecycle.json"
-        path.write_text(json.dumps(active_signal_lifecycle, default=str), encoding="utf-8")
-    except Exception:
-        pass
+    save_signal_lifecycle()
 
     log.info(f"[lifecycle open] topic={key} source={message.id} ai_dest={rec['ai_dest_id']}")
 
@@ -404,26 +608,84 @@ def move_update_from_text(text):
     raw = text or ""
     t = raw.upper()
 
-    if not re.search(r"\b(MOVE|MOVED|CHANGE|CHANGED|UPDATE|UPDATED|ENTERED|ENTRY|LIMIT)\b", t):
+    # Do not steal messages that contain a fresh next trade.
+    if has_next_trade_context(raw) and looks_like_new_setup_inside_update(raw):
         return None
 
-    if re.search(r"\b(CANCEL|REMOVE|INVALID|CLOSE|CLOSED)\b", t):
-        return {"type": "CANCEL", "text": "<b>SIGNAL CANCELLED / REMOVED 💎</b>"}
+    if re.search(r"\b(CANCEL|CANCELLED|REMOVE|REMOVED|INVALID|DELETE|DELETED|NO\s+TRADE|DON'?T\s+ENTER|DO\s+NOT\s+ENTER)\b", t):
+        return {"type": "CANCEL", "status": "CANCELLED", "text": "<b>SIGNAL CANCELLED / REMOVED 💎</b>"}
 
-    m = re.search(r"\b(?:MOVE|MOVED|CHANGE|CHANGED|UPDATE|UPDATED)\s+(?:LIMIT|ENTRY|ENTRIES|LEVEL)?\s*(?:TO|AT)?\s*[:@\-]?\s*(\d+(?:\.\d+)?)\b", t)
+    if not re.search(r"\b(MOVE|MOVED|CHANGE|CHANGED|UPDATE|UPDATED|ENTERED|ENTRY|ENTRIES|LIMIT)\b", t):
+        return None
+
+    m = re.search(r"\b(?:MOVE|MOVED|CHANGE|CHANGED|UPDATE|UPDATED)\s+(?:LIMIT|ENTRY|ENTRIES|LEVEL|ZONE)?\s*(?:TO|AT)?\s*[:@\-]?\s*(\d{1,7}(?:\.\d+)?)\b", t)
     if not m:
-        m = re.search(r"\b(?:ENTERED|ENTRY)\s+(?:AT|TO)?\s*[:@\-]?\s*(\d+(?:\.\d+)?)\b", t)
+        m = re.search(r"\b(?:ENTERED|ENTRY|ENTRIES)\s+(?:AT|TO)?\s*[:@\-]?\s*(\d{1,7}(?:\.\d+)?)\b", t)
 
     if not m:
         return None
 
     price = m.group(1)
-    return {"type": "MOVE_ENTRY", "price": price, "text": f"<b>ENTRY UPDATED TO {price} 💎</b>"}
+    return {
+        "type": "MOVE_ENTRY",
+        "status": "ENTRY_UPDATED",
+        "price": price,
+        "text": f"<b>ENTRY UPDATED TO {price} 💎</b>",
+    }
+
+
+def update_reply_signature(key, ai_msg_id, update_text):
+    base = "|".join([
+        str(key),
+        str(ai_msg_id),
+        re.sub(r"\s+", " ", str(update_text or "").strip().upper()),
+    ])
+    return hashlib.sha256(base.encode("utf-8", errors="ignore")).hexdigest()
+
+
+def should_skip_duplicate_update_reply(key, ai_msg_id, update_text):
+    now = time.time()
+    cutoff = now - UPDATE_REPLY_DEDUPE_SECONDS
+
+    for sig, ts in list(update_reply_dedupe.items()):
+        try:
+            if float(ts) < cutoff:
+                update_reply_dedupe.pop(sig, None)
+        except Exception:
+            update_reply_dedupe.pop(sig, None)
+
+    sig = update_reply_signature(key, ai_msg_id, update_text)
+    if sig in update_reply_dedupe:
+        return True
+
+    update_reply_dedupe[sig] = now
+    return False
+
+
+def lifecycle_status_from_update(direct_update, move_update):
+    if move_update:
+        return move_update.get("status") or move_update.get("type") or "UPDATED"
+
+    update = classify_signal_update_text(direct_update or "")
+    if update:
+        return update.get("status") or update.get("type") or "UPDATED"
+
+    du = (direct_update or "").upper()
+    if "STOP LOSS HIT" in du:
+        return "SL_HIT"
+    if "BREAKEVEN" in du:
+        return "BREAKEVEN_HIT"
+    if "TP" in du and "HIT" in du:
+        return "TP_HIT"
+    if "PIPS" in du:
+        return "RUNNING_PROFIT"
+    return "UPDATED"
 
 
 async def maybe_send_lifecycle_update(message, key, text):
     # First priority: direct reply to known signal packet.
-    direct_update = format_signal_update_text(text)
+    update_obj = classify_signal_update_text(text)
+    direct_update = update_obj.get("text") if update_obj else None
     move_update = move_update_from_text(text)
 
     if not direct_update and not move_update:
@@ -448,6 +710,10 @@ async def maybe_send_lifecycle_update(message, key, text):
 
     update_text = direct_update or move_update["text"]
 
+    if should_skip_duplicate_update_reply(key, ai_msg_id, update_text):
+        log.info(f"[signal update skipped] duplicate update key={key} ai_msg={ai_msg_id} text={update_text}")
+        return True
+
     sent = await send_message_with_retry(
         SIGNAL_DEST_CHAT,
         update_text,
@@ -464,28 +730,32 @@ async def maybe_send_lifecycle_update(message, key, text):
         "ts": time.time(),
     })
 
-    if move_update and move_update.get("type") == "CANCEL":
-        rec["status"] = "CANCELLED"
-    elif move_update and move_update.get("type") == "MOVE_ENTRY":
-        rec["status"] = "ENTRY_UPDATED"
+    new_status = lifecycle_status_from_update(text, move_update)
+    if new_status:
+        rec["status"] = new_status
+
+    if move_update and move_update.get("type") == "MOVE_ENTRY":
         try:
             rec["entry_low"] = float(move_update["price"])
             rec["entry_high"] = float(move_update["price"])
         except Exception:
             pass
-    elif direct_update:
-        if "TP" in direct_update.upper() and "HIT" in direct_update.upper():
-            rec["status"] = "TP_HIT"
-        elif "PIPS" in direct_update.upper():
-            rec["status"] = "RUNNING_PROFIT"
 
-    try:
-        path = DATA_DIR / "signal_lifecycle.json"
-        path.write_text(json.dumps(active_signal_lifecycle, default=str), encoding="utf-8")
-    except Exception:
-        pass
+    if move_update and move_update.get("type") == "MOVE_SL":
+        try:
+            rec["sl"] = float(move_update["price"])
+        except Exception:
+            pass
 
-    log.info(f"[lifecycle update sent] topic={key} source_msg={message.id} ai_msg={ai_msg_id} text={update_text}")
+    if rec.get("status") not in ("CANCELLED", "SL_HIT", "CLOSED", "CLOSED_MANUAL"):
+        try:
+            last_active_signal_by_topic[int(key)] = rec
+        except Exception:
+            pass
+
+    save_signal_lifecycle()
+
+    log.info(f"[lifecycle update sent] topic={key} source_msg={message.id} ai_msg={ai_msg_id} status={rec.get('status')} text={update_text}")
     return True
 
 
@@ -1041,6 +1311,9 @@ async def main():
     log.info(f"SIGNAL_SEND_RETRY_SLEEP_CAP_SECONDS={SIGNAL_SEND_RETRY_SLEEP_CAP_SECONDS}")
     log.info(f"TP same-as-above context active: True")
     log.info(f"Signal update replies active: True")
+    log.info("Signal update formatter v2 active: True")
+    log.info(f"UPDATE_REPLY_DEDUPE_SECONDS={UPDATE_REPLY_DEDUPE_SECONDS}")
+    log.info(f"Loaded lifecycle records: {len(active_signal_lifecycle)}")
     log.info("Signal lifecycle tracking active: True")
     log.info("Provider profiles active: True")
     log.info("Promo filter active: True")
