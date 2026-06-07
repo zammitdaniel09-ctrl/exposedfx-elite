@@ -298,7 +298,7 @@ def packet_for_reply_source(message, key):
 
 
 def has_next_trade_context(text: str) -> bool:
-    t = (text or "").upper()
+    t = update_match_text(text)
     return bool(re.search(
         r"\b(GO\s+IN\s+TO\s+THE\s+NEXT\s+TRADE|GO\s+INTO\s+THE\s+NEXT\s+TRADE|NEXT\s+TRADE|NEW\s+TRADE|NEXT\s+SETUP|NEW\s+SETUP)\b",
         t,
@@ -306,7 +306,7 @@ def has_next_trade_context(text: str) -> bool:
 
 
 def looks_like_new_setup_inside_update(text: str) -> bool:
-    t = (text or "").upper()
+    t = update_match_text(text)
     has_direction = bool(re.search(r"\b(BUY|SELL|BUYS|SELLS|BUYING|SELLING|LONG|SHORT)\b", t))
     has_sl = bool(re.search(r"\b(SL|S/L|STOP|STOPLOSS|STOP\s*LOSS)\b\s*[:@\-]?\s*\d", t))
     has_price = bool(re.search(r"\b\d{3,7}(?:\.\d+)?\b", t))
@@ -320,8 +320,26 @@ def clean_update_body(text: str) -> str:
     return raw.strip()
 
 
+def update_match_text(text: str) -> str:
+    """
+    Normalises messy provider updates:
+    - breakEven -> break Even
+    - break-even -> break even
+    - S/L -> SL
+    - extra spaces/newlines removed
+    """
+    raw = clean_update_body(text)
+    raw = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", raw)
+    raw = raw.replace("-", " ")
+    raw = raw.replace("_", " ")
+    raw = re.sub(r"\bS\s*/\s*L\b", "SL", raw, flags=re.IGNORECASE)
+    raw = re.sub(r"[’']", "", raw)
+    raw = re.sub(r"\s+", " ", raw)
+    return raw.upper().strip()
+
+
 def extract_update_pips(text: str):
-    t = (text or "").upper()
+    t = update_match_text(text)
     matches = re.findall(r"([+-]?\s*\d{1,5}(?:\.\d+)?)\s*(?:PIP|PIPS)\b", t)
     out = []
 
@@ -336,7 +354,7 @@ def extract_update_pips(text: str):
 
 
 def extract_update_tp_nums(text: str):
-    t = (text or "").upper()
+    t = update_match_text(text)
     nums = []
 
     patterns = [
@@ -364,6 +382,18 @@ def extract_update_tp_nums(text: str):
     if re.search(patterns[5], t):
         nums.append("3")
 
+    # word TP update aliases
+    word_tp_map = {
+        "ONE": "1", "TWO": "2", "THREE": "3", "FOUR": "4", "FIVE": "5",
+        "FIRST": "1", "SECOND": "2", "THIRD": "3", "FOURTH": "4", "FIFTH": "5",
+    }
+
+    for word, number in word_tp_map.items():
+        if re.search(rf"\b(TP|TARGET|TAKE\s*PROFIT)\s*(?:NUMBER\s*)?{word}\b[^\n]{{0,40}}\b(HIT|DONE|SMASHED|CLEANED|REACHED|TOUCHED|CLOSED|SECURED|BANKED)\b", t):
+            nums.append(number)
+        if re.search(rf"\b{word}\s+(TP|TARGET|TAKE\s*PROFIT)\b[^\n]{{0,40}}\b(HIT|DONE|SMASHED|CLEANED|REACHED|TOUCHED|CLOSED|SECURED|BANKED)\b", t):
+            nums.append(number)
+
     # compact TP update aliases
     for m in re.findall(r"\b(?:TP|TARGET|TAKE\s*PROFIT)\s*#?\s*(\d{1,2})\b[^\n]{0,40}\b(HIT|DONE|SMASHED|CLEANED|REACHED|TOUCHED|CLOSED|SECURED|BANKED)\b", t):
         if isinstance(m, tuple):
@@ -384,7 +414,7 @@ def extract_update_tp_nums(text: str):
 
 
 def has_set_be_instruction(text: str) -> bool:
-    t = (text or "").upper()
+    t = update_match_text(text)
 
     patterns = [
         r"\bSET\s+(?:SL\s+)?(?:TO\s+)?BE\b",
@@ -403,12 +433,65 @@ def has_set_be_instruction(text: str) -> bool:
     return any(re.search(p, t) for p in patterns)
 
 
+def is_breakeven_hit_phrase(text: str) -> bool:
+    t = update_match_text(text)
+    return bool(
+        re.search(r"\b(BE|BREAKEVEN|BREAK\s*EVEN)\b.{0,30}\b(HIT|TOUCHED|REACHED|DONE|TAKEN|CLOSED|GOT\s+HIT)\b", t)
+        or re.search(r"\b(HIT|TOUCHED|REACHED|DONE|TAKEN|CLOSED)\b.{0,30}\b(BE|BREAKEVEN|BREAK\s*EVEN)\b", t)
+        or re.search(r"\b(BE|BREAKEVEN|BREAK\s*EVEN)\b\s+(HAS\s+BEEN|HAS|WAS|GOT|IS)\s+(HIT|TOUCHED|REACHED|DONE|TAKEN|CLOSED)", t)
+    )
+
+
+def is_stop_loss_hit_phrase(text: str) -> bool:
+    t = update_match_text(text)
+    return bool(
+        re.search(r"\b(SL|STOP|STOPLOSS|STOP\s*LOSS)\b.{0,35}\b(HIT|TOUCHED|REACHED|DONE|TAKEN|CLOSED|GOT\s+HIT)\b", t)
+        or re.search(r"\b(HIT|TOUCHED|REACHED|DONE|TAKEN|CLOSED)\b.{0,35}\b(SL|STOP|STOPLOSS|STOP\s*LOSS)\b", t)
+        or re.search(r"\b(STOPPED\s+OUT|STOP\s+OUT|STOP\s+PRESO|LOSS\s+TAKEN|LOSS\s+HIT)\b", t)
+        or re.search(r"\b(SL|STOP|STOPLOSS|STOP\s*LOSS)\b\s+(HAS\s+BEEN|HAS|WAS|GOT|IS)\s+(HIT|TOUCHED|REACHED|DONE|TAKEN|CLOSED)", t)
+    )
+
+
+def is_entry_triggered_phrase(text: str) -> bool:
+    t = update_match_text(text)
+    return bool(
+        re.search(r"\b(ENTRY|ORDER|TRADE|POSITION)\b.{0,30}\b(TRIGGERED|ACTIVATED|FILLED|EXECUTED|OPENED|ACTIVE)\b", t)
+        or re.search(r"\b(TRIGGERED|ACTIVATED|FILLED|EXECUTED|OPENED)\b.{0,30}\b(ENTRY|ORDER|TRADE|POSITION)\b", t)
+        or re.search(r"\b(WE\s+ARE\s+IN|IN\s+TRADE|IN\s+THE\s+TRADE|TRADE\s+IS\s+LIVE|ORDER\s+LIVE)\b", t)
+    )
+
+
+def is_cancel_update_phrase(text: str) -> bool:
+    t = update_match_text(text)
+    return bool(
+        re.search(r"\b(CANCEL|CANCELLED|INVALID|REMOVE|REMOVED|DELETE|DELETED)\b.{0,25}\b(TRADE|SIGNAL|ORDER|SETUP|PENDING)?\b", t)
+        or re.search(r"\b(NO\s+TRADE|DONT\s+ENTER|DO\s+NOT\s+ENTER|FORGET\s+IT|SKIP\s+THIS|SKIP\s+TRADE|SETUP\s+INVALID|TRADE\s+INVALID)\b", t)
+    )
+
+
+def is_close_update_phrase(text: str) -> bool:
+    t = update_match_text(text)
+    return bool(
+        re.search(r"\b(CLOSE|EXIT|MANUALLY\s+CLOSE|BOOK)\b.{0,25}\b(NOW|TRADE|FULL|ALL|PROFIT|PROFITS|IT)?\b", t)
+        or re.search(r"\b(FULL\s+CLOSE|CLOSE\s+IT|CLOSE\s+EVERYTHING|ALL\s+CLOSED|BOOKED\s+PROFIT|PROFIT\s+BOOKED)\b", t)
+    )
+
+
+def is_partial_update_phrase(text: str) -> bool:
+    t = update_match_text(text)
+    return bool(
+        re.search(r"\b(PARTIAL|PARTIALS|HALF|50%)\b", t)
+        or re.search(r"\b(CLOSE|SECURE|TAKE|BANK|BOOK)\b.{0,25}\b(SOME|PARTIAL|HALF|50)\b", t)
+        or re.search(r"\b(SOME\s+PROFIT|PROFIT\s+SECURED|BANKED\s+SOME|BOOKED\s+SOME)\b", t)
+    )
+
+
 def classify_signal_update_text(text):
     raw = clean_update_body(text)
     if not raw:
         return None
 
-    t = raw.upper()
+    t = update_match_text(raw)
     low = raw.lower()
 
     # Important: if provider says old trade hit SL then gives next trade,
@@ -440,6 +523,52 @@ def classify_signal_update_text(text):
 
     pips = extract_update_pips(raw)
     pips_part = pips[0] if len(pips) == 1 else None
+
+    # Broad phrase catchers for messy provider updates.
+    if is_cancel_update_phrase(raw):
+        return {
+            "type": "CANCEL",
+            "status": "CANCELLED",
+            "text": f"<b>SIGNAL CANCELLED / REMOVED {EMOJI_DIAMOND}</b>",
+        }
+
+    if is_stop_loss_hit_phrase(raw):
+        extra = f" {pips_part}" if pips_part else ""
+        return {
+            "type": "SL_HIT",
+            "status": "SL_HIT",
+            "text": f"<b>STOP LOSS HIT{extra} {EMOJI_CROSS}</b>",
+        }
+
+    if is_breakeven_hit_phrase(raw):
+        return {
+            "type": "BE_HIT",
+            "status": "BREAKEVEN_HIT",
+            "text": f"<b>BREAKEVEN HIT {EMOJI_DIAMOND}</b>",
+        }
+
+    if is_entry_triggered_phrase(raw):
+        return {
+            "type": "ENTRY_TRIGGERED",
+            "status": "ENTRY_TRIGGERED",
+            "text": f"<b>ENTRY TRIGGERED {EMOJI_DIAMOND}</b>",
+        }
+
+    if is_close_update_phrase(raw) and not extract_update_tp_nums(raw):
+        extra = f" {pips_part}" if pips_part else ""
+        return {
+            "type": "CLOSE",
+            "status": "CLOSED_MANUAL",
+            "text": f"<b>CLOSE TRADE NOW{extra} {EMOJI_DIAMOND}</b>",
+        }
+
+    if is_partial_update_phrase(raw) and not extract_update_tp_nums(raw):
+        extra = f" {pips_part}" if pips_part else ""
+        return {
+            "type": "PARTIAL",
+            "status": "PARTIAL_PROFIT",
+            "text": f"<b>PARTIAL PROFITS SECURED{extra} {EMOJI_DIAMOND}</b>",
+        }
 
     # Cancel / invalid / remove pending
     if re.search(r"\b(CANCEL|CANCELLED|INVALID|REMOVE|REMOVED|DELETE|DELETED|NO\s+TRADE|DON'?T\s+ENTER|DO\s+NOT\s+ENTER)\b", t):
@@ -681,7 +810,7 @@ def remember_lifecycle(message, key, result, sent_messages):
 
 def move_update_from_text(text):
     raw = text or ""
-    t = raw.upper()
+    t = update_match_text(raw)
 
     # Do not steal messages that contain a fresh next trade.
     if has_next_trade_context(raw) and looks_like_new_setup_inside_update(raw):
@@ -1201,7 +1330,7 @@ def first_buffer_message(key):
 
 def looks_like_fresh_signal_start(text: str) -> bool:
     """Detect a new setup so stale incomplete buffers do not swallow the next signal."""
-    t = (text or "").upper()
+    t = update_match_text(text)
     has_direction = bool(re.search(r"\b(BUY|BUYS|BUYING|SELL|SELLS|SELLING|LONG|LONGS|SHORT|SHORTS)\b", t))
     has_entry = bool(re.search(rf"\b(ENTRY|ENTRIES|ENTER|ENTERING)\b[^\n]{{0,40}}{PRICE_RE}", t))
     has_symbol = bool(re.search(r"\b(XAUUSD|XAGUSD|GOLD|SILVER|BTC|ETH|SOL|NAS100|NASDAQ|US100|US30|US500|GER40|DAX|[A-Z]{6})\b", t))
@@ -1236,7 +1365,7 @@ def remember_last_signal_context(key, result):
 
 
 def apply_same_as_above_context(key, text):
-    t = (text or "").upper()
+    t = update_match_text(text)
     if "SAME AS ABOVE" not in t:
         return text
 
@@ -1255,7 +1384,7 @@ def looks_like_partial_signal_piece(text: str) -> bool:
     if not raw:
         return False
 
-    t = raw.upper()
+    t = update_match_text(raw)
 
     # Management/recap-only messages should not enter the signal buffer.
     recap_only = bool(re.search(r"\b(TP\s*\d*\s*HIT|PIPS?\s*[✅🎯💥🔥]?|BE\s*HIT|SL\s*TO\s*BE|CLOSE|CLOSED|CANCEL|INVALID|STILL\s+RUNNING)\b", t))
@@ -1686,6 +1815,7 @@ async def main():
     log.info("Any update classifier final active: True")
     log.info("Animated update tg-emoji active: True")
     log.info("Lifecycle pip enrichment active: True")
+    log.info("Broad update phrase reinforcement active: True")
     log.info("Signal lifecycle tracking active: True")
     log.info("Provider profiles active: True")
     log.info("Promo filter active: True")
