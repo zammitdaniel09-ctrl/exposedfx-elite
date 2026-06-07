@@ -31,7 +31,11 @@ IGNORE_SYMBOLS = {
 
 
 def clean(text: str) -> str:
-    return (text or "").replace("\u200b", " ").replace("\xa0", " ").strip()
+    raw = text or ""
+    raw = raw.replace("\\n", "\n").replace("\\r", "\n")
+    raw = raw.replace("\u200b", " ").replace("\xa0", " ")
+    raw = raw.replace("→", " ").replace("➡", " ").replace("➜", " ")
+    return raw.strip()
 
 
 
@@ -115,7 +119,8 @@ def has_strict_new_signal_requirements(text: str) -> bool:
         return False
 
     try:
-        return extract_entry(raw) is not None
+        direction = direction_from_text(raw)
+        return extract_breakout_entry(raw, direction) is not None or extract_entry(raw) is not None
     except Exception:
         pass
 
@@ -497,6 +502,60 @@ def remove_protected_trade_level_segments(line: str) -> str:
     return cleaned
 
 
+def extract_breakout_entry(text: str, direction: Optional[str] = None) -> Optional[tuple[float, float]]:
+    """
+    Directly extracts breakout/pending-stop entry prices:
+    - SELL UNDER 4450
+    - SELL GOLD BELOW 4450
+    - BELOW 4450 SELL
+    - BUY XAUUSD ABOVE 4510
+    - BUYS OVER 4505
+    - ABOVE 4510 BUY
+    """
+    raw = clean(text)
+    t = raw.upper()
+    direction = direction or direction_from_text(raw)
+
+    if direction not in ("BUY", "SELL"):
+        return None
+
+    patterns = []
+
+    if direction == "SELL":
+        patterns = [
+            rf"\b(?:SELL|SELLS|SELLING|SHORT|SHORTS|SHORTING)\b[^\n]{{0,50}}\b(?:BELOW|UNDER)\b\s*(?:AT|@|:|\-)?\s*({PRICE_RE})",
+            rf"\b(?:BELOW|UNDER)\b\s*(?:AT|@|:|\-)?\s*({PRICE_RE})\b[^\n]{{0,50}}\b(?:SELL|SELLS|SELLING|SHORT|SHORTS|SHORTING)\b",
+            rf"\bSELL\s+STOP\b[^\n]{{0,30}}({PRICE_RE})",
+            rf"\b(?:BREAK|BREAKS|BROKE|BREAKOUT|IF\s+BREAKS?)\b[^\n]{{0,20}}\b(?:BELOW|UNDER)\b\s*(?:AT|@|:|\-)?\s*({PRICE_RE})",
+        ]
+
+    if direction == "BUY":
+        patterns = [
+            rf"\b(?:BUY|BUYS|BUYING|LONG|LONGS|LONGING)\b[^\n]{{0,50}}\b(?:ABOVE|OVER)\b\s*(?:AT|@|:|\-)?\s*({PRICE_RE})",
+            rf"\b(?:ABOVE|OVER)\b\s*(?:AT|@|:|\-)?\s*({PRICE_RE})\b[^\n]{{0,50}}\b(?:BUY|BUYS|BUYING|LONG|LONGS|LONGING)\b",
+            rf"\bBUY\s+STOP\b[^\n]{{0,30}}({PRICE_RE})",
+            rf"\b(?:BREAK|BREAKS|BROKE|BREAKOUT|IF\s+BREAKS?)\b[^\n]{{0,20}}\b(?:ABOVE|OVER)\b\s*(?:AT|@|:|\-)?\s*({PRICE_RE})",
+        ]
+
+    for pat in patterns:
+        m = re.search(pat, t)
+        if not m:
+            continue
+        try:
+            price = float(m.group(1))
+        except Exception:
+            continue
+
+        # Avoid tiny fake gold/default entries.
+        symbol_hint = normalize_symbol("", raw)
+        if symbol_family(symbol_hint) == "GOLD" and price < 1000:
+            continue
+
+        return price, price
+
+    return None
+
+
 def extract_entry(text: str) -> Optional[tuple[float, float]]:
     """
     Robust entry extractor.
@@ -514,6 +573,11 @@ def extract_entry(text: str) -> Optional[tuple[float, float]]:
     raw = clean(text)
     up = raw.upper().replace("–", "-").replace("—", "-")
     lines = [line.strip() for line in up.splitlines() if line.strip()]
+
+    direction_hint = direction_from_text(raw)
+    breakout = extract_breakout_entry(raw, direction_hint)
+    if breakout:
+        return breakout
 
     direction_re = re.compile(r"\b(BUY|BUYS|BUYING|SELL|SELLS|SELLING|LONG|LONGS|SHORT|SHORTS)\b")
     bad_entry_line_re = re.compile(r"\b(SL|S/L|STOP\s*LOSS|STOPLOSS|TP|TARGET|TAKE\s*PROFIT)\b")
@@ -782,7 +846,9 @@ def order_type_from_text(text: str, direction: str) -> str:
     Detect pending order / breakout wording.
     Covers:
     - sells below / sell under / shorts below
+    - sell gold below / sell xauusd under
     - buys above / buy over / longs above
+    - buy xauusd above / buys gold over
     - buy/sell stop
     - break/breaks/breakout above/below
     - above 4450 buy / below 4450 sell
@@ -790,23 +856,23 @@ def order_type_from_text(text: str, direction: str) -> str:
     t = clean(text).upper()
 
     if direction == "SELL":
-        if re.search(r"\b(SELL|SELLS|SELLING|SHORT|SHORTS|SHORTING)\s+(BELOW|UNDER)\b", t):
+        if re.search(r"\b(SELL|SELLS|SELLING|SHORT|SHORTS|SHORTING)\b[^\n]{0,50}\b(BELOW|UNDER)\b", t):
             return "SELL_STOP"
         if re.search(r"\bSELL\s+STOP\b", t):
             return "SELL_STOP"
-        if re.search(r"\b(?:BREAK|BREAKS|BROKE|BREAKOUT|IF\s+BREAKS?)\s+(BELOW|UNDER)\b", t):
+        if re.search(r"\b(?:BREAK|BREAKS|BROKE|BREAKOUT|IF\s+BREAKS?)\b[^\n]{0,20}\b(BELOW|UNDER)\b", t):
             return "SELL_STOP"
-        if re.search(rf"\b(BELOW|UNDER)\s+{PRICE_RE}\b[^\n]{{0,30}}\b(SELL|SELLS|SHORT|SHORTS)\b", t):
+        if re.search(rf"\b(BELOW|UNDER)\s+{PRICE_RE}\b[^\n]{{0,50}}\b(SELL|SELLS|SHORT|SHORTS)\b", t):
             return "SELL_STOP"
 
     if direction == "BUY":
-        if re.search(r"\b(BUY|BUYS|BUYING|LONG|LONGS|LONGING)\s+(ABOVE|OVER)\b", t):
+        if re.search(r"\b(BUY|BUYS|BUYING|LONG|LONGS|LONGING)\b[^\n]{0,50}\b(ABOVE|OVER)\b", t):
             return "BUY_STOP"
         if re.search(r"\bBUY\s+STOP\b", t):
             return "BUY_STOP"
-        if re.search(r"\b(?:BREAK|BREAKS|BROKE|BREAKOUT|IF\s+BREAKS?)\s+(ABOVE|OVER)\b", t):
+        if re.search(r"\b(?:BREAK|BREAKS|BROKE|BREAKOUT|IF\s+BREAKS?)\b[^\n]{0,20}\b(ABOVE|OVER)\b", t):
             return "BUY_STOP"
-        if re.search(rf"\b(ABOVE|OVER)\s+{PRICE_RE}\b[^\n]{{0,30}}\b(BUY|BUYS|LONG|LONGS)\b", t):
+        if re.search(rf"\b(ABOVE|OVER)\s+{PRICE_RE}\b[^\n]{{0,50}}\b(BUY|BUYS|LONG|LONGS)\b", t):
             return "BUY_STOP"
 
     if re.search(r"\b(BUY|SELL)\s+LIMIT\b", t):
@@ -829,7 +895,7 @@ def regex_extract(text: str) -> Optional[Dict[str, Any]]:
         return None
 
     symbol = normalize_symbol("", raw)
-    entry = extract_entry(raw)
+    entry = extract_breakout_entry(raw, direction) or extract_entry(raw)
     sl = extract_sl(raw)
 
     if entry is None or sl is None:
