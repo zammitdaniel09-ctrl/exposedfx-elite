@@ -27,6 +27,8 @@ DEST_CHAT = int(os.environ.get("CLEAN_FORWARD_DEST_CHAT", "-5144279180"))
 # I recommend 1 so the new group only sees clean signals, no forwarded/source mess.
 COPY_MODE = os.environ.get("CLEAN_FORWARD_COPY_MODE", "1").strip() == "1"
 STRICT_ONLY_AI_FORMAT = os.environ.get("STRICT_ONLY_AI_FORMAT", "1").strip() == "1"
+CLEAN_SEND_RETRY_ATTEMPTS = int(os.environ.get("CLEAN_SEND_RETRY_ATTEMPTS", "2"))
+CLEAN_SEND_RETRY_SLEEP_CAP_SECONDS = int(os.environ.get("CLEAN_SEND_RETRY_SLEEP_CAP_SECONDS", "60"))
 
 DATA_DIR = Path(os.environ.get("DATA_DIR") or "./data")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -151,8 +153,11 @@ def text_of(message) -> str:
 def is_my_formatted_signal(text: str) -> bool:
     """
     FINAL GROUP RULE:
-    Only forward completed AI formatted signal templates.
-    Nothing else is allowed.
+    Forward only completed AI formatted signal templates.
+
+    Supports:
+    - BUY/SELL normal zone templates
+    - BUY STOP / SELL STOP breakout templates
     """
     t = (text or "").strip()
     low = t.lower()
@@ -174,7 +179,6 @@ def is_my_formatted_signal(text: str) -> bool:
         "move sl",
         "click close",
         "edit the lot size",
-        "pips",
         "ended with",
         "weekly recap",
         "daily recap",
@@ -189,27 +193,41 @@ def is_my_formatted_signal(text: str) -> bool:
     if any(x in low for x in blocked):
         return False
 
-    if not HEADER_RE.search(t):
+    is_breakout = bool(re.search(
+        r"\b(BUY|SELL)\s+STOP\s+[A-Z0-9/ ]{3,30}\s+BREAKOUT\s+ZONE\b",
+        t,
+        re.IGNORECASE,
+    ))
+
+    is_normal = bool(HEADER_RE.search(t))
+
+    if not is_breakout and not is_normal:
         return False
 
-    required = [
-        r"•\s*(?:buy|sell)\s+point\s*:\s*[-+]?\d",
-        r"•\s*layer\s+point\s*:\s*[-+]?\d",
-        r"•\s*stop\s+loss\s*:\s*[-+]?\d",
-        r"(?:📌\s*)?tp1\s*-\s*[-+]?\d",
-        r"(?:📌\s*)?tp2\s*-\s*[-+]?\d",
-        r"(?:📌\s*)?tp3\s*-\s*[-+]?\d",
-        r"(?:📌\s*)?tp8\s*-\s*[-+]?\d",
-        r"(?:📌\s*)?tp9\s*-\s*open",
+    common_required = [
+        r"stop\s+loss\s*:\s*[-+]?\d",
+        r"(?:📌\s*)?tp1\s*-\s*(?:[-+]?\d|open)",
         r"risk\s*:\s*(?:low|medium|high)",
         r"tips\s*:",
-        r"breakeven\s+after\s+tp1\s+hit",
-        r"use\s+correct\s+risk\s+management",
-        r"take\s+spread\s+into\s+consideration",
         r"this\s+is\s+not\s+financial\s+advice",
     ]
 
-    return all(re.search(pattern, t, re.IGNORECASE) for pattern in required)
+    if not all(re.search(pattern, t, re.IGNORECASE) for pattern in common_required):
+        return False
+
+    if is_breakout:
+        breakout_required = [
+            r"trigger\s+(?:above|below)\s*:\s*[-+]?\d",
+            r"(?:buy|sell)\s+stop\s+entry\s*:\s*[-+]?\d",
+        ]
+        return all(re.search(pattern, t, re.IGNORECASE) for pattern in breakout_required)
+
+    normal_required = [
+        r"(?:buy|sell)\s+point\s*:\s*[-+]?\d",
+        r"layer\s+point\s*:\s*[-+]?\d",
+    ]
+
+    return all(re.search(pattern, t, re.IGNORECASE) for pattern in normal_required)
 
 
 
@@ -220,16 +238,16 @@ def is_clean_signal_update(text: str) -> bool:
     if not t:
         return False
 
-    if "💎" not in t:
-        return False
-
     if "SOURCE:" in u or "EXPOSEDFX |" in u:
         return False
 
     has_pips = bool(re.search(r"\+\s*\d{1,5}(?:\.\d+)?\s*PIPS\b", u))
     has_tp_hit = bool(re.search(r"\bTP\s*#?\s*\d{1,2}\s+HIT\b", u))
+    has_be = bool(re.search(r"\b(?:BE|BREAK\s*EVEN|BREAKEVEN)\s+HIT\b", u))
+    has_sl_move = bool(re.search(r"\b(?:SL|STOP\s*LOSS)\s+(?:TO|MOVED\s+TO)\s+(?:BE|BREAK\s*EVEN|[-+]?\d)", u))
 
-    return has_pips or has_tp_hit
+    return has_pips or has_tp_hit or has_be or has_sl_move
+
 
 
 def clean_reply_target(message):
@@ -258,39 +276,155 @@ def clean_reply_target(message):
     return None
 
 
+def is_transient_clean_error(exc):
+    text = str(exc).lower()
+    patterns = (
+        "timeout",
+        "timed out",
+        "connection",
+        "server disconnected",
+        "temporarily",
+        "transport",
+        "network",
+        "request failed",
+    )
+    return any(p in text for p in patterns)
+
+
+async def clean_send_message_with_retry(*args, **kwargs):
+    attempts = max(1, CLEAN_SEND_RETRY_ATTEMPTS)
+    last_exc = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            return await client.send_message(*args, **kwargs)
+        except FloodWaitError as exc:
+            last_exc = exc
+            wait = min(int(exc.seconds) + 1, CLEAN_SEND_RETRY_SLEEP_CAP_SECONDS)
+            log.warning(f"[clean send retry floodwait] attempt={attempt}/{attempts} wait={wait}s")
+            if attempt < attempts:
+                await asyncio.sleep(wait)
+                continue
+            raise
+        except Exception as exc:
+            last_exc = exc
+            if attempt < attempts and is_transient_clean_error(exc):
+                wait = min(2 * attempt, CLEAN_SEND_RETRY_SLEEP_CAP_SECONDS)
+                log.warning(f"[clean send retry transient] attempt={attempt}/{attempts} wait={wait}s error={exc}")
+                await asyncio.sleep(wait)
+                continue
+            raise
+
+    if last_exc:
+        raise last_exc
+    return None
+
+
+async def clean_send_file_with_retry(*args, **kwargs):
+    attempts = max(1, CLEAN_SEND_RETRY_ATTEMPTS)
+    last_exc = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            return await client.send_file(*args, **kwargs)
+        except FloodWaitError as exc:
+            last_exc = exc
+            wait = min(int(exc.seconds) + 1, CLEAN_SEND_RETRY_SLEEP_CAP_SECONDS)
+            log.warning(f"[clean media retry floodwait] attempt={attempt}/{attempts} wait={wait}s")
+            if attempt < attempts:
+                await asyncio.sleep(wait)
+                continue
+            raise
+        except Exception as exc:
+            last_exc = exc
+            if attempt < attempts and is_transient_clean_error(exc):
+                wait = min(2 * attempt, CLEAN_SEND_RETRY_SLEEP_CAP_SECONDS)
+                log.warning(f"[clean media retry transient] attempt={attempt}/{attempts} wait={wait}s error={exc}")
+                await asyncio.sleep(wait)
+                continue
+            raise
+
+    if last_exc:
+        raise last_exc
+    return None
+
+
+async def clean_forward_with_retry(dest_chat, message):
+    attempts = max(1, CLEAN_SEND_RETRY_ATTEMPTS)
+    last_exc = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            return await client.forward_messages(dest_chat, message)
+        except FloodWaitError as exc:
+            last_exc = exc
+            wait = min(int(exc.seconds) + 1, CLEAN_SEND_RETRY_SLEEP_CAP_SECONDS)
+            log.warning(f"[clean forward retry floodwait] attempt={attempt}/{attempts} wait={wait}s msg={getattr(message, 'id', None)}")
+            if attempt < attempts:
+                await asyncio.sleep(wait)
+                continue
+            raise
+        except Exception as exc:
+            last_exc = exc
+            if attempt < attempts and is_transient_clean_error(exc):
+                wait = min(2 * attempt, CLEAN_SEND_RETRY_SLEEP_CAP_SECONDS)
+                log.warning(f"[clean forward retry transient] attempt={attempt}/{attempts} wait={wait}s msg={getattr(message, 'id', None)} error={exc}")
+                await asyncio.sleep(wait)
+                continue
+            raise
+
+    if last_exc:
+        raise last_exc
+    return None
+
+
 @client.on(events.NewMessage(chats=SOURCE_CHAT))
 async def on_message(event):
-    message = event.message
-    text = text_of(message)
+    try:
+        message = event.message
+        text = text_of(message)
+        key = map_key(message.id)
 
-    if is_clean_signal_update(text):
-        reply_to = clean_reply_target(message)
-        if not reply_to:
-            log.info(f"[SKIP UPDATE NO MAP] msg={message.id} text={text[:80]!r}")
+        if is_clean_signal_update(text):
+            reply_to = clean_reply_target(message)
+            if not reply_to:
+                log.info(f"[SKIP UPDATE NO MAP] msg={message.id} text={text[:80]!r}")
+                return
+
+            if clean_message_map.get(key):
+                log.info(f"[SKIP UPDATE DUPLICATE] msg={message.id} mapped={clean_message_map.get(key)}")
+                return
+
+            sent = await clean_send_message_with_retry(
+                DEST_CHAT,
+                text,
+                formatting_entities=getattr(message, "entities", None),
+                parse_mode=None,
+                link_preview=False,
+                reply_to=reply_to,
+            )
+
+            if not sent:
+                log.warning(f"[CLEAN UPDATE SEND RETURNED NONE] msg={message.id}")
+                return
+
+            remember_clean_copy(message, sent)
+            log.info(f"[COPIED SIGNAL UPDATE] msg={message.id} -> {DEST_CHAT} reply_to={reply_to}")
             return
 
-        sent = await client.send_message(
-            DEST_CHAT,
-            text,
-            formatting_entities=getattr(message, "entities", None),
-            parse_mode=None,
-            link_preview=False,
-            reply_to=reply_to,
-        )
-        remember_clean_copy(message, sent)
-        log.info(f"[COPIED SIGNAL UPDATE] msg={message.id} -> {DEST_CHAT} reply_to={reply_to}")
-        return
+        if not is_my_formatted_signal(text):
+            log.info(f"[SKIP] msg={message.id} text={text[:80]!r}")
+            return
 
-    if not is_my_formatted_signal(text):
-        log.info(f"[SKIP] msg={message.id} text={text[:80]!r}")
-        return
+        if clean_message_map.get(key):
+            log.info(f"[SKIP DUPLICATE SIGNAL] msg={message.id} mapped={clean_message_map.get(key)}")
+            return
 
-    try:
         sent = None
 
         if COPY_MODE:
             if getattr(message, "media", None):
-                sent = await client.send_file(
+                sent = await clean_send_file_with_retry(
                     DEST_CHAT,
                     message.media,
                     caption=text,
@@ -299,7 +433,7 @@ async def on_message(event):
                 )
                 log.info(f"[COPIED MEDIA SIGNAL] msg={message.id} -> {DEST_CHAT}")
             else:
-                sent = await client.send_message(
+                sent = await clean_send_message_with_retry(
                     DEST_CHAT,
                     text,
                     formatting_entities=getattr(message, "entities", None),
@@ -308,24 +442,29 @@ async def on_message(event):
                 )
                 log.info(f"[COPIED SIGNAL] msg={message.id} -> {DEST_CHAT}")
         else:
-            sent = await client.forward_messages(DEST_CHAT, message)
+            sent = await clean_forward_with_retry(DEST_CHAT, message)
             log.info(f"[FORWARDED SIGNAL] msg={message.id} -> {DEST_CHAT}")
+
+        if not sent:
+            log.warning(f"[CLEAN SIGNAL SEND RETURNED NONE] msg={message.id}")
+            return
 
         remember_clean_copy(message, sent)
 
-    except FloodWaitError as exc:
-        wait = min(int(exc.seconds) + 1, 60)
-        log.warning(f"FloodWait {exc.seconds}s; sleeping {wait}s")
-        await asyncio.sleep(wait)
-
     except Exception as exc:
-        log.exception(f"[FAILED] msg={message.id}: {exc}")
+        log.exception(f"[CLEAN HANDLER FAILED] msg={getattr(getattr(event, 'message', None), 'id', None)}: {exc}")
+        alert_crash("exposedfx-clean-signal-forwarder:on_message", exc)
 
 
 @client.on(events.MessageDeleted(chats=SOURCE_CHAT))
 async def on_deleted(event):
-    for source_msg_id in getattr(event, "deleted_ids", []) or []:
-        await delete_clean_copy_by_source_id(source_msg_id)
+    try:
+        for source_msg_id in getattr(event, "deleted_ids", []) or []:
+            await delete_clean_copy_by_source_id(source_msg_id)
+    except Exception as exc:
+        log.exception(f"[CLEAN DELETE HANDLER FAILED]: {exc}")
+        alert_crash("exposedfx-clean-signal-forwarder:on_deleted", exc)
+
 
 
 async def main():
@@ -338,6 +477,9 @@ async def main():
     me = await client.get_me()
     log.info(f"Logged in as {me.first_name} | id={me.id}")
     log.info(f"Source={SOURCE_CHAT} Destination={DEST_CHAT} CopyMode={COPY_MODE}")
+    log.info(f"STRICT_ONLY_AI_FORMAT={STRICT_ONLY_AI_FORMAT}")
+    log.info(f"CLEAN_SEND_RETRY_ATTEMPTS={CLEAN_SEND_RETRY_ATTEMPTS}")
+    log.info(f"CLEAN_SEND_RETRY_SLEEP_CAP_SECONDS={CLEAN_SEND_RETRY_SLEEP_CAP_SECONDS}")
     log.info("Clean formatted signal forwarder running...")
     log.info("Delete sync from incoming group to final group: True")
     log.info("Clean signal update mirror active: True")
@@ -345,4 +487,9 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except Exception as exc:
+        log.exception(f"[clean forwarder fatal crash] {type(exc).__name__}: {exc}")
+        alert_crash("exposedfx-clean-signal-forwarder:fatal", exc)
+        raise
