@@ -339,15 +339,38 @@ def update_match_text(text: str) -> str:
 
 
 def extract_update_pips(text: str):
-    t = update_match_text(text)
-    matches = re.findall(r"([+-]?\s*\d{1,5}(?:\.\d+)?)\s*(?:PIP|PIPS)\b", t)
+    t = update_match_text(text) if "update_match_text" in globals() else (text or "").upper()
     out = []
 
-    for m in matches:
-        value = m.replace(" ", "")
-        if not value.startswith(("+", "-")):
-            value = "+" + value
-        out.append(value + "PIPS")
+    # Normal forms:
+    # +50PIPS, 50 pips, +50 points, +50 pts, +50p
+    patterns = [
+        r"([+-]?\s*\d{1,5}(?:\.\d+)?)\s*(?:PIP|PIPS|POINT|POINTS|PTS|P)\b",
+        r"\b(?:RUNNING|FLOATING|PROFIT|PROFITS|UP|MADE|SECURED|BANKED|BOOKED|CLOSED)\s*([+-]?\s*\d{1,5}(?:\.\d+)?)\s*(?:PIP|PIPS|POINT|POINTS|PTS|P)?\b",
+        r"\b([+-]\s*\d{1,5}(?:\.\d+)?)\b",
+    ]
+
+    for pat in patterns:
+        for m in re.findall(pat, t):
+            value = str(m).replace(" ", "")
+            if not value:
+                continue
+
+            # Avoid accidentally treating prices as pips.
+            try:
+                numeric = abs(float(value.replace("+", "").replace("-", "")))
+            except Exception:
+                continue
+
+            if numeric > 2000:
+                continue
+
+            if not value.startswith(("+", "-")):
+                value = "+" + value
+
+            item = value + "PIPS"
+            if item not in out:
+                out.append(item)
 
     return out
 
@@ -403,6 +426,38 @@ def extract_update_tp_nums(text: str):
 
     # emoji-only compact updates like "TP1 ✅"
     for m in re.findall(r"\b(?:TP|TARGET)\s*#?\s*(\d{1,2})\s*(?:✅|✔|☑|💎|🔥)\b", t):
+        nums.append(str(m))
+
+    # ultra TP variation aliases
+    tp_words = {
+        "ONE": "1", "TWO": "2", "THREE": "3", "FOUR": "4", "FIVE": "5",
+        "FIRST": "1", "SECOND": "2", "THIRD": "3", "FOURTH": "4", "FIFTH": "5",
+    }
+
+    # T1 hit, T2 done, tgt1 reached, target 1 secured, take profit 1 banked
+    for m in re.findall(r"\b(?:TP|T|TGT|TARGET|TAKE\s*PROFIT)\s*#?\s*(\d{1,2})\b[^\n]{0,50}\b(HIT|DONE|SMASHED|CLEANED|REACHED|TOUCHED|CLOSED|SECURED|BANKED|TAKEN|FILLED)\b", t):
+        if isinstance(m, tuple):
+            nums.append(str(m[0]))
+        else:
+            nums.append(str(m))
+
+    # hit TP1, secured T2, reached target 3
+    for m in re.findall(r"\b(HIT|DONE|SMASHED|CLEANED|REACHED|TOUCHED|CLOSED|SECURED|BANKED|TAKEN|FILLED)\b[^\n]{0,50}\b(?:TP|T|TGT|TARGET|TAKE\s*PROFIT)\s*#?\s*(\d{1,2})\b", t):
+        if isinstance(m, tuple):
+            nums.append(str(m[1]))
+        else:
+            nums.append(str(m))
+
+    # first target hit, second tp done, target one reached
+    for word, number in tp_words.items():
+        if re.search(rf"\b{word}\s+(?:TP|TGT|TARGET|TAKE\s*PROFIT)\b[^\n]{{0,50}}\b(HIT|DONE|SMASHED|CLEANED|REACHED|TOUCHED|CLOSED|SECURED|BANKED|TAKEN|FILLED)\b", t):
+            nums.append(number)
+
+        if re.search(rf"\b(?:TP|TGT|TARGET|TAKE\s*PROFIT)\s+{word}\b[^\n]{{0,50}}\b(HIT|DONE|SMASHED|CLEANED|REACHED|TOUCHED|CLOSED|SECURED|BANKED|TAKEN|FILLED)\b", t):
+            nums.append(number)
+
+    # emoji-only updates: TP1 ✅, T2 💎, target 3 🔥
+    for m in re.findall(r"\b(?:TP|T|TGT|TARGET)\s*#?\s*(\d{1,2})\s*(?:✅|✔|☑|💎|🔥|🚀|🎯)\b", t):
         nums.append(str(m))
 
     unique = []
@@ -486,6 +541,133 @@ def is_partial_update_phrase(text: str) -> bool:
     )
 
 
+def phrase_bank_update(raw: str, pips_part: str | None):
+    """
+    Extra safety net for messy provider wording.
+    Runs inside classify_signal_update_text after setup/promo blocking.
+    """
+    t = update_match_text(raw)
+
+    def has_any(phrases):
+        return any(p in t for p in phrases)
+
+    extra = f" {pips_part}" if pips_part else ""
+
+    be_hit_phrases = [
+        "BE HAS BEEN HIT", "BE BEEN HIT", "BE GOT HIT", "BE WAS HIT", "BE IS HIT",
+        "BREAKEVEN HAS BEEN HIT", "BREAKEVEN GOT HIT", "BREAKEVEN WAS HIT", "BREAKEVEN IS HIT",
+        "BREAK EVEN HAS BEEN HIT", "BREAK EVEN GOT HIT", "BREAK EVEN WAS HIT",
+        "BE TOUCHED", "BREAKEVEN TOUCHED", "BREAK EVEN TOUCHED",
+        "BE REACHED", "BREAKEVEN REACHED", "BREAK EVEN REACHED",
+        "BACK TO BE", "BACK TO BREAKEVEN", "BACK TO BREAK EVEN",
+        "CLOSED AT BE", "CLOSE AT BE", "SCRATCHED", "NO LOSS", "NO LOSS TRADE",
+    ]
+
+    set_be_phrases = [
+        "SET BE", "SET TO BE", "SET SL BE", "SET SL TO BE",
+        "SET BREAKEVEN", "SET TO BREAKEVEN", "SET BREAK EVEN", "SET TO BREAK EVEN",
+        "MOVE BE", "MOVE TO BE", "MOVE SL BE", "MOVE SL TO BE",
+        "MOVE BREAKEVEN", "MOVE SL TO BREAKEVEN", "MOVE SL TO BREAK EVEN",
+        "SL TO ENTRY", "SL AT ENTRY", "STOP TO ENTRY", "STOPLOSS TO ENTRY",
+        "MAKE IT RISK FREE", "RISK FREE NOW", "SET RISK FREE",
+        "PROTECT TRADE", "PROTECT POSITION", "SECURE ENTRY",
+    ]
+
+    sl_hit_phrases = [
+        "SL HAS BEEN HIT", "SL BEEN HIT", "SL GOT HIT", "SL WAS HIT", "SL IS HIT",
+        "STOP HAS BEEN HIT", "STOP GOT HIT", "STOP WAS HIT", "STOP IS HIT",
+        "STOP LOSS HAS BEEN HIT", "STOP LOSS GOT HIT", "STOP LOSS WAS HIT",
+        "STOPLOSS HAS BEEN HIT", "STOPLOSS GOT HIT",
+        "SL TOUCHED", "STOP TOUCHED", "STOP LOSS TOUCHED", "STOPLOSS TOUCHED",
+        "SL REACHED", "STOP REACHED", "STOP LOSS REACHED", "STOPLOSS REACHED",
+        "SL TAKEN", "STOP TAKEN", "STOP LOSS TAKEN", "LOSS TAKEN",
+        "STOPPED OUT", "STOP OUT", "LOSS BOOKED", "TRADE STOPPED",
+    ]
+
+    entry_phrases = [
+        "ENTRY ACTIVE", "ENTRY ACTIVATED", "ENTRY FILLED", "ENTRY EXECUTED",
+        "ORDER ACTIVE", "ORDER ACTIVATED", "ORDER FILLED", "ORDER EXECUTED",
+        "TRADE ACTIVE", "TRADE LIVE", "TRADE IS LIVE", "POSITION OPEN",
+        "WE ARE IN", "WE IN", "NOW IN", "IN TRADE", "IN THE TRADE",
+        "TRIGGERED IN", "FILLED NOW", "ENTERED NOW",
+    ]
+
+    close_phrases = [
+        "CLOSE IT", "CLOSE EVERYTHING", "CLOSE ALL", "CLOSE FULL", "FULL CLOSE",
+        "EXIT NOW", "EXIT TRADE", "EXIT HERE", "ALL OUT", "GET OUT",
+        "BOOK PROFITS", "BOOK PROFIT", "PROFIT BOOKED", "TAKE PROFIT NOW",
+        "SECURE ALL", "BANK ALL", "CLOSE MANUALLY",
+    ]
+
+    partial_phrases = [
+        "TAKE PARTIAL", "TAKE PARTIALS", "PARTIAL TAKEN", "PARTIAL SECURED",
+        "SECURE PARTIAL", "SECURE PARTIALS", "BOOK PARTIAL", "BOOK PARTIALS",
+        "BANK PARTIAL", "BANK PARTIALS", "BANK SOME", "BOOK SOME",
+        "SECURE SOME", "TAKE SOME", "CLOSE HALF", "CLOSE 50",
+        "CLOSE 50%", "HALF CLOSE", "50% CLOSE",
+    ]
+
+    cancel_phrases = [
+        "CANCEL THIS", "CANCEL TRADE", "CANCEL SIGNAL", "CANCEL ORDER",
+        "TRADE CANCELLED", "SIGNAL CANCELLED", "ORDER CANCELLED",
+        "SETUP INVALID", "TRADE INVALID", "SIGNAL INVALID", "ORDER INVALID",
+        "DO NOT ENTER", "DONT ENTER", "NO ENTRY", "NO TRADE",
+        "FORGET THIS", "FORGET IT", "SKIP THIS", "SKIP TRADE",
+        "REMOVE ORDER", "DELETE ORDER", "PENDING CANCELLED",
+    ]
+
+    if has_any(cancel_phrases):
+        return {
+            "type": "CANCEL",
+            "status": "CANCELLED",
+            "text": f"<b>SIGNAL CANCELLED / REMOVED {EMOJI_DIAMOND}</b>",
+        }
+
+    if has_any(sl_hit_phrases):
+        return {
+            "type": "SL_HIT",
+            "status": "SL_HIT",
+            "text": f"<b>STOP LOSS HIT{extra} {EMOJI_CROSS}</b>",
+        }
+
+    if has_any(be_hit_phrases):
+        return {
+            "type": "BE_HIT",
+            "status": "BREAKEVEN_HIT",
+            "text": f"<b>BREAKEVEN HIT{extra} {EMOJI_DIAMOND}</b>",
+        }
+
+    if has_any(set_be_phrases):
+        return {
+            "type": "MOVE_SL",
+            "status": "SL_TO_BE",
+            "text": f"<b>SL MOVED TO BREAKEVEN{extra} {EMOJI_DIAMOND}</b>",
+        }
+
+    if has_any(entry_phrases):
+        return {
+            "type": "ENTRY_TRIGGERED",
+            "status": "ENTRY_TRIGGERED",
+            "text": f"<b>ENTRY TRIGGERED{extra} {EMOJI_DIAMOND}</b>",
+        }
+
+    if has_any(close_phrases) and not extract_update_tp_nums(raw):
+        return {
+            "type": "CLOSE",
+            "status": "CLOSED_MANUAL",
+            "text": f"<b>CLOSE TRADE NOW{extra} {EMOJI_DIAMOND}</b>",
+        }
+
+    if has_any(partial_phrases) and not extract_update_tp_nums(raw):
+        return {
+            "type": "PARTIAL",
+            "status": "PARTIAL_PROFIT",
+            "text": f"<b>PARTIAL PROFITS SECURED{extra} {EMOJI_DIAMOND}</b>",
+        }
+
+    return None
+
+
 def classify_signal_update_text(text):
     raw = clean_update_body(text)
     if not raw:
@@ -523,6 +705,10 @@ def classify_signal_update_text(text):
 
     pips = extract_update_pips(raw)
     pips_part = pips[0] if len(pips) == 1 else None
+
+    phrase_bank = phrase_bank_update(raw, pips_part)
+    if phrase_bank:
+        return phrase_bank
 
     # Broad phrase catchers for messy provider updates.
     if is_cancel_update_phrase(raw):
@@ -1816,6 +2002,7 @@ async def main():
     log.info("Animated update tg-emoji active: True")
     log.info("Lifecycle pip enrichment active: True")
     log.info("Broad update phrase reinforcement active: True")
+    log.info("Ultra update variation phrase bank active: True")
     log.info("Signal lifecycle tracking active: True")
     log.info("Provider profiles active: True")
     log.info("Promo filter active: True")
