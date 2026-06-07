@@ -19,8 +19,28 @@ from telegram_worker.universal_signal_ai import extract_and_format, looks_like_s
 log = logging.getLogger("exposedfx-ai-signal-formatter")
 
 PRICE_RE = r"\d{1,7}(?:\.\d+)?"
-EMOJI_DIAMOND = "\U0001F48E"
-EMOJI_CROSS = "\u274C"
+
+UPDATE_CUSTOM_EMOJIS = {
+    "DIAMOND": os.environ.get("CUSTOM_EMOJI_DIAMOND", "5427168083074628963"),
+    "RED_CROSS": os.environ.get("CUSTOM_EMOJI_RED_CROSS", "5210952531676504517"),
+}
+
+UPDATE_EMOJI_FALLBACKS = {
+    "DIAMOND": "\U0001F48E",
+    "RED_CROSS": "\u274C",
+}
+
+
+def update_ce(name: str) -> str:
+    doc_id = str(UPDATE_CUSTOM_EMOJIS.get(name, "")).strip()
+    emoji = UPDATE_EMOJI_FALLBACKS.get(name, "")
+    if doc_id and doc_id.isdigit():
+        return f'<tg-emoji emoji-id="{doc_id}">{emoji}</tg-emoji>'
+    return emoji
+
+
+EMOJI_DIAMOND = update_ce("DIAMOND")
+EMOJI_CROSS = update_ce("RED_CROSS")
 
 
 def chat_id_from_env(name, default):
@@ -304,12 +324,15 @@ def extract_update_pips(text: str):
     t = (text or "").upper()
     matches = re.findall(r"([+-]?\s*\d{1,5}(?:\.\d+)?)\s*(?:PIP|PIPS)\b", t)
     out = []
+
     for m in matches:
         value = m.replace(" ", "")
         if not value.startswith(("+", "-")):
             value = "+" + value
-        out.append(value)
+        out.append(value + "PIPS")
+
     return out
+
 
 
 def extract_update_tp_nums(text: str):
@@ -347,6 +370,26 @@ def extract_update_tp_nums(text: str):
             unique.append(n)
 
     return unique
+
+
+def has_set_be_instruction(text: str) -> bool:
+    t = (text or "").upper()
+
+    patterns = [
+        r"\bSET\s+(?:SL\s+)?(?:TO\s+)?BE\b",
+        r"\bSET\s+(?:SL\s+)?(?:TO\s+)?BREAKEVEN\b",
+        r"\bSET\s+(?:SL\s+)?(?:TO\s+)?BREAK\s*EVEN\b",
+        r"\bMOVE\s+(?:SL|STOP|STOPLOSS|STOP\s*LOSS)\s+(?:TO\s+)?BE\b",
+        r"\bMOVE\s+(?:SL|STOP|STOPLOSS|STOP\s*LOSS)\s+(?:TO\s+)?BREAKEVEN\b",
+        r"\bSL\s+(?:TO|AT)?\s*BE\b",
+        r"\bSL\s+(?:TO|AT)?\s*BREAKEVEN\b",
+        r"\bSTOP\s*(?:LOSS)?\s+(?:TO|AT)?\s*BE\b",
+        r"\bRISK\s*FREE\b",
+        r"\bPROTECT(?:ED)?\s+(?:ENTRY|TRADE|POSITION)\b",
+        r"\bSECURE\s+(?:BE|BREAKEVEN|BREAK\s*EVEN)\b",
+    ]
+
+    return any(re.search(p, t) for p in patterns)
 
 
 def classify_signal_update_text(text):
@@ -402,6 +445,25 @@ def classify_signal_update_text(text):
             "type": "SL_HIT",
             "status": "SL_HIT",
             "text": f"<b>STOP LOSS HIT{extra} {EMOJI_CROSS}</b>",
+        }
+
+    # TP hit combined with BE instruction, e.g. "TP2 HIT SET BE"
+    early_tp_nums = extract_update_tp_nums(raw)
+    if early_tp_nums and has_set_be_instruction(raw):
+        tp_part = " ".join(f"TP{n}" for n in early_tp_nums) + " HIT"
+        extra = f" {pips_part}" if pips_part else ""
+        return {
+            "type": "TP_HIT_SET_BE",
+            "status": "TP_HIT_SL_TO_BE",
+            "text": f"<b>{tp_part}{extra} {EMOJI_DIAMOND}</b>\n<b>SL MOVED TO BREAKEVEN {EMOJI_DIAMOND}</b>",
+        }
+
+    # Bare breakeven instruction, e.g. "SET BE", "SET BREAKEVEN"
+    if has_set_be_instruction(raw):
+        return {
+            "type": "MOVE_SL",
+            "status": "SL_TO_BE",
+            "text": f"<b>SL MOVED TO BREAKEVEN {EMOJI_DIAMOND}</b>",
         }
 
     # Breakeven hit
@@ -474,7 +536,7 @@ def classify_signal_update_text(text):
         return {
             "type": "PIPS",
             "status": "RUNNING_PROFIT",
-            "text": f"<b>{pips_part}PIPS {EMOJI_DIAMOND}</b>",
+            "text": f"<b>{pips_part} {EMOJI_DIAMOND}</b>",
         }
 
     # Hold / running
@@ -1304,6 +1366,12 @@ def is_any_signal_update_text(text: str) -> bool:
         log.warning(f"[update classify check failed] {exc}")
 
     try:
+        if has_set_be_instruction(text):
+            return True
+    except Exception as exc:
+        log.warning(f"[set be update check failed] {exc}")
+
+    try:
         if move_update_from_text(text):
             return True
     except Exception as exc:
@@ -1418,7 +1486,7 @@ async def main():
     log.info(f"Loaded lifecycle records: {len(active_signal_lifecycle)}")
     log.info(f"Recovered lifecycle records from packet map: {recovered_lifecycle_records}")
     log.info("Lifecycle open on signal send active: True")
-    log.info("Recognized updates blocked from partial buffer: True")
+    log.info("Recognized updates blocked from partial buffer: True")\n    log.info("Any update classifier final active: True")\n    log.info("Animated update tg-emoji active: True")
     log.info("Signal lifecycle tracking active: True")
     log.info("Provider profiles active: True")
     log.info("Promo filter active: True")
