@@ -42,3 +42,13 @@ test_*parser*.py
 test_numeric_parser.py
 update_route_*.py
 verify_*fixed.py
+
+# Local Telegram sessions / Railway secret chunks
+*.session-journal
+*SESSION*CHUNKS*.txt
+*session*chunks*.txt
+_imperium_session_debug.py
+_make_imperium*.py
+make_imperium_session.py
+IMPERIUM_*SESSION*.txt
+IMPERIUM_*CHUNKS*.txt
