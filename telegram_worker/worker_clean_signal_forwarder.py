@@ -378,6 +378,86 @@ async def clean_forward_with_retry(dest_chat, message):
     return None
 
 
+async def delete_existing_clean_copy_for_edit(source_msg_id):
+    key = map_key(source_msg_id)
+    dst_id = clean_message_map.get(key)
+
+    if not dst_id:
+        return False
+
+    try:
+        await client.delete_messages(DEST_CHAT, int(dst_id))
+        clean_message_map.pop(key, None)
+        save_message_map()
+        log.info(f"[clean edit cleanup] source_msg={source_msg_id} deleted_old_dest={dst_id}")
+        return True
+    except Exception as exc:
+        log.warning(f"[clean edit cleanup failed] source_msg={source_msg_id} dest_msg={dst_id}: {exc}")
+        return False
+
+
+async def copy_clean_signal_message(message, edited=False):
+    text = text_of(message)
+
+    sent = None
+
+    if COPY_MODE:
+        if getattr(message, "media", None):
+            sent = await clean_send_file_with_retry(
+                DEST_CHAT,
+                message.media,
+                caption=text,
+                formatting_entities=getattr(message, "entities", None),
+                parse_mode=None,
+            )
+            log.info(f"[COPIED MEDIA SIGNAL{' EDIT' if edited else ''}] msg={message.id} -> {DEST_CHAT}")
+        else:
+            sent = await clean_send_message_with_retry(
+                DEST_CHAT,
+                text,
+                formatting_entities=getattr(message, "entities", None),
+                parse_mode=None,
+                link_preview=False,
+            )
+            log.info(f"[COPIED SIGNAL{' EDIT' if edited else ''}] msg={message.id} -> {DEST_CHAT}")
+    else:
+        sent = await clean_forward_with_retry(DEST_CHAT, message)
+        log.info(f"[FORWARDED SIGNAL{' EDIT' if edited else ''}] msg={message.id} -> {DEST_CHAT}")
+
+    if not sent:
+        log.warning(f"[CLEAN SIGNAL SEND RETURNED NONE] msg={message.id}")
+        return None
+
+    remember_clean_copy(message, sent)
+    return sent
+
+
+async def copy_clean_update_message(message, edited=False):
+    text = text_of(message)
+    reply_to = clean_reply_target(message)
+
+    if not reply_to:
+        log.info(f"[SKIP UPDATE NO MAP{' EDIT' if edited else ''}] msg={message.id} text={text[:80]!r}")
+        return None
+
+    sent = await clean_send_message_with_retry(
+        DEST_CHAT,
+        text,
+        formatting_entities=getattr(message, "entities", None),
+        parse_mode=None,
+        link_preview=False,
+        reply_to=reply_to,
+    )
+
+    if not sent:
+        log.warning(f"[CLEAN UPDATE SEND RETURNED NONE] msg={message.id}")
+        return None
+
+    remember_clean_copy(message, sent)
+    log.info(f"[COPIED SIGNAL UPDATE{' EDIT' if edited else ''}] msg={message.id} -> {DEST_CHAT} reply_to={reply_to}")
+    return sent
+
+
 @client.on(events.NewMessage(chats=SOURCE_CHAT))
 async def on_message(event):
     try:
@@ -456,6 +536,41 @@ async def on_message(event):
         alert_crash("exposedfx-clean-signal-forwarder:on_message", exc)
 
 
+@client.on(events.MessageEdited(chats=SOURCE_CHAT))
+async def on_message_edited(event):
+    try:
+        message = event.message
+        text = text_of(message)
+        key = map_key(message.id)
+        had_existing = bool(clean_message_map.get(key))
+
+        # If this edited message already exists in final group, remove old copy first.
+        if had_existing:
+            await delete_existing_clean_copy_for_edit(message.id)
+
+        if is_clean_signal_update(text):
+            sent = await copy_clean_update_message(message, edited=True)
+            if sent:
+                log.info(f"[MIRRORED CLEAN UPDATE EDIT] msg={message.id}")
+            return
+
+        if is_my_formatted_signal(text):
+            sent = await copy_clean_signal_message(message, edited=True)
+            if sent:
+                log.info(f"[MIRRORED CLEAN SIGNAL EDIT] msg={message.id}")
+            return
+
+        # Edited into invalid/non-final content. If old final copy existed, it was already removed.
+        if had_existing:
+            log.info(f"[CLEAN EDIT REMOVED INVALID COPY] msg={message.id} text={text[:80]!r}")
+        else:
+            log.info(f"[SKIP EDIT NON SIGNAL] msg={message.id} text={text[:80]!r}")
+
+    except Exception as exc:
+        log.exception(f"[CLEAN EDIT HANDLER FAILED] msg={getattr(getattr(event, 'message', None), 'id', None)}: {exc}")
+        alert_crash("exposedfx-clean-signal-forwarder:on_message_edited", exc)
+
+
 @client.on(events.MessageDeleted(chats=SOURCE_CHAT))
 async def on_deleted(event):
     try:
@@ -483,6 +598,7 @@ async def main():
     log.info("Clean formatted signal forwarder running...")
     log.info("Delete sync from incoming group to final group: True")
     log.info("Clean signal update mirror active: True")
+    log.info("Clean signal edit mirror active: True")
     await client.run_until_disconnected()
 
 
