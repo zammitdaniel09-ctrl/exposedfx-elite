@@ -364,6 +364,17 @@ def extract_update_tp_nums(text: str):
     if re.search(patterns[5], t):
         nums.append("3")
 
+    # compact TP update aliases
+    for m in re.findall(r"\b(?:TP|TARGET|TAKE\s*PROFIT)\s*#?\s*(\d{1,2})\b[^\n]{0,40}\b(HIT|DONE|SMASHED|CLEANED|REACHED|TOUCHED|CLOSED|SECURED|BANKED)\b", t):
+        if isinstance(m, tuple):
+            nums.append(str(m[0]))
+        else:
+            nums.append(str(m))
+
+    # emoji-only compact updates like "TP1 ✅"
+    for m in re.findall(r"\b(?:TP|TARGET)\s*#?\s*(\d{1,2})\s*(?:✅|✔|☑|💎|🔥)\b", t):
+        nums.append(str(m))
+
     unique = []
     for n in nums:
         if n not in unique:
@@ -439,7 +450,7 @@ def classify_signal_update_text(text):
         }
 
     # Stop loss hit
-    if re.search(r"\b(SL\s+HIT|HIT\s+SL|STOPLOSS\s+HIT|STOP\s*LOSS\s+HIT|HIT\s+STOPLOSS|HIT\s+STOP\s*LOSS|STOP\s+PRESO|STOPPED\s+OUT)\b", t):
+    if re.search(r"\b(SL\s+HIT|HIT\s+SL|STOPLOSS\s+HIT|STOP\s*LOSS\s+HIT|HIT\s+STOPLOSS|HIT\s+STOP\s*LOSS|STOP\s+PRESO|STOPPED\s+OUT|STOP\s+HIT|HIT\s+STOP|SL\s+DONE|LOSS\s+HIT|STOPPED)\b", t):
         extra = f" {pips_part}" if pips_part else ""
         return {
             "type": "SL_HIT",
@@ -503,7 +514,7 @@ def classify_signal_update_text(text):
         }
 
     # Close / secure trade
-    if re.search(r"\b(CLOSE\s+NOW|CLOSE\s+TRADE|CLOSE\s+FULL|CLOSE\s+ALL|MANUALLY\s+CLOSE|TAKE\s+PROFIT\s+NOW)\b", t):
+    if re.search(r"\b(CLOSE\s+NOW|CLOSE\s+TRADE|CLOSE\s+FULL|CLOSE\s+ALL|MANUALLY\s+CLOSE|TAKE\s+PROFIT\s+NOW|EXIT\s+NOW|EXIT\s+TRADE|CLOSE\s+IT|FULL\s+CLOSE|BOOK\s+PROFIT|BOOK\s+PROFITS)\b", t):
         extra = f" {pips_part}" if pips_part else ""
         return {
             "type": "CLOSE",
@@ -512,7 +523,7 @@ def classify_signal_update_text(text):
         }
 
     # Partial close / secure partial
-    if re.search(r"\b(PARTIAL|PARTIALS|CLOSE\s+HALF|CLOSE\s+50|SECURE\s+SOME|TAKE\s+SOME|TAKE\s+PARTIAL|TAKE\s+PROFIT\s+PARTIAL)\b", t):
+    if re.search(r"\b(PARTIAL|PARTIALS|CLOSE\s+HALF|CLOSE\s+50|SECURE\s+SOME|SECURED\s+SOME|TAKE\s+SOME|TAKE\s+PARTIAL|TAKE\s+PROFIT\s+PARTIAL|BANK\s+SOME|BOOK\s+SOME)\b", t):
         extra = f" {pips_part}" if pips_part else ""
         return {
             "type": "PARTIAL",
@@ -746,6 +757,190 @@ def lifecycle_status_from_update(direct_update, move_update):
     return "UPDATED"
 
 
+def safe_float(value):
+    try:
+        if value is None or value == "":
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def lifecycle_pip_multiplier(symbol: str) -> float:
+    """
+    Converts price difference into display pips.
+
+    XAUUSD:
+    $1 = 10 pips.
+
+    Forex:
+    normal pairs = 10000 pips per 1.0
+    JPY pairs = 100 pips per 1.0
+
+    Indices/crypto:
+    fallback = 1 point = 1 pip-style unit.
+    """
+    s = str(symbol or "").upper().replace("/", "")
+
+    if s in ("XAU", "XAUUSD", "GOLD"):
+        return 10.0
+
+    if len(s) == 6 and s.endswith("JPY"):
+        return 100.0
+
+    if len(s) == 6 and any(s.endswith(x) for x in ("USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD")):
+        return 10000.0
+
+    return 1.0
+
+
+def lifecycle_entry_ref(rec) -> float | None:
+    direction = str(rec.get("direction") or "").upper()
+    lo = safe_float(rec.get("entry_low"))
+    hi = safe_float(rec.get("entry_high"))
+
+    if lo is None and hi is None:
+        return None
+
+    if lo is None:
+        lo = hi
+    if hi is None:
+        hi = lo
+
+    if direction == "SELL":
+        return max(lo, hi)
+
+    if direction == "BUY":
+        return min(lo, hi)
+
+    return (lo + hi) / 2
+
+
+def format_lifecycle_pips(value) -> str:
+    try:
+        v = float(value)
+    except Exception:
+        return ""
+
+    sign = "+" if v >= 0 else "-"
+    av = abs(v)
+
+    if abs(av - round(av)) < 0.05:
+        number = str(int(round(av)))
+    else:
+        number = f"{av:.1f}".rstrip("0").rstrip(".")
+
+    return f"{sign}{number}PIPS"
+
+
+def lifecycle_update_pips_from_rec(update_obj, rec, raw_text: str):
+    if not update_obj or not rec:
+        return None
+
+    utype = str(update_obj.get("type") or "").upper()
+    direction = str(rec.get("direction") or "").upper()
+    symbol = str(rec.get("symbol") or "").upper()
+
+    entry = lifecycle_entry_ref(rec)
+    if entry is None:
+        return None
+
+    mult = lifecycle_pip_multiplier(symbol)
+
+    # TP updates: use TP number and original stored TP level.
+    if utype in ("TP_HIT", "TP_HIT_SET_BE"):
+        nums = extract_update_tp_nums(raw_text) or ["1"]
+        tps = rec.get("tps") or []
+
+        for n in nums:
+            try:
+                idx = int(n) - 1
+            except Exception:
+                continue
+
+            if idx < 0 or idx >= len(tps):
+                continue
+
+            tp = safe_float(tps[idx])
+            if tp is None:
+                continue
+
+            if direction == "SELL":
+                return format_lifecycle_pips((entry - tp) * mult)
+
+            if direction == "BUY":
+                return format_lifecycle_pips((tp - entry) * mult)
+
+    # SL hit: calculate negative pips from entry to SL.
+    if utype == "SL_HIT":
+        sl = safe_float(rec.get("sl"))
+        if sl is None:
+            return None
+
+        if direction == "SELL":
+            return format_lifecycle_pips((entry - sl) * mult)
+
+        if direction == "BUY":
+            return format_lifecycle_pips((sl - entry) * mult)
+
+    # BE / set BE / entry triggered are always 0 pips by definition.
+    if utype in ("BE_HIT", "MOVE_SL", "ENTRY_TRIGGERED"):
+        status = str(update_obj.get("status") or "").upper()
+        text = str(update_obj.get("text") or "").upper()
+
+        if "BREAKEVEN" in status or "BREAKEVEN" in text or utype == "ENTRY_TRIGGERED":
+            return "+0PIPS"
+
+    return None
+
+
+def insert_pips_into_update_text(update_text: str, pips: str) -> str:
+    if not update_text or not pips:
+        return update_text
+
+    if "PIPS" in update_text.upper():
+        return update_text
+
+    lines = str(update_text).split("\n")
+    if not lines:
+        return update_text
+
+    first = lines[0]
+
+    inserted = False
+    for emoji in (EMOJI_DIAMOND, EMOJI_CROSS):
+        token = f" {emoji}</b>"
+        if token in first:
+            first = first.replace(token, f" {pips} {emoji}</b>", 1)
+            inserted = True
+            break
+
+    if not inserted and "</b>" in first:
+        first = first.replace("</b>", f" {pips}</b>", 1)
+
+    lines[0] = first
+    return "\n".join(lines)
+
+
+def enrich_update_text_with_lifecycle_pips(update_text: str, update_obj, rec, raw_text: str) -> str:
+    if not update_text or not update_obj or not rec:
+        return update_text
+
+    if "PIPS" in str(update_text).upper():
+        return update_text
+
+    pips = lifecycle_update_pips_from_rec(update_obj, rec, raw_text)
+    if not pips:
+        return update_text
+
+    enriched = insert_pips_into_update_text(update_text, pips)
+
+    if enriched != update_text:
+        log.info(f"[update pips enriched] {update_text!r} -> {enriched!r}")
+
+    return enriched
+
+
 async def maybe_send_lifecycle_update(message, key, text):
     # First priority: direct reply to known signal packet.
     update_obj = classify_signal_update_text(text)
@@ -775,6 +970,7 @@ async def maybe_send_lifecycle_update(message, key, text):
         return False
 
     update_text = direct_update or move_update["text"]
+    update_text = enrich_update_text_with_lifecycle_pips(update_text, update_obj or move_update, rec, text)
 
     if should_skip_duplicate_update_reply(key, ai_msg_id, update_text):
         log.info(f"[signal update skipped] duplicate update key={key} ai_msg={ai_msg_id} text={update_text}")
@@ -1489,6 +1685,7 @@ async def main():
     log.info("Recognized updates blocked from partial buffer: True")
     log.info("Any update classifier final active: True")
     log.info("Animated update tg-emoji active: True")
+    log.info("Lifecycle pip enrichment active: True")
     log.info("Signal lifecycle tracking active: True")
     log.info("Provider profiles active: True")
     log.info("Promo filter active: True")
