@@ -19,6 +19,8 @@ from telegram_worker.universal_signal_ai import extract_and_format, looks_like_s
 log = logging.getLogger("exposedfx-ai-signal-formatter")
 
 PRICE_RE = r"\d{1,7}(?:\.\d+)?"
+EMOJI_DIAMOND = "\U0001F48E"
+EMOJI_CROSS = "\u274C"
 
 
 def chat_id_from_env(name, default):
@@ -390,7 +392,7 @@ def classify_signal_update_text(text):
         return {
             "type": "CANCEL",
             "status": "CANCELLED",
-            "text": "<b>SIGNAL CANCELLED / REMOVED 💎</b>",
+            "text": f"<b>SIGNAL CANCELLED / REMOVED {EMOJI_DIAMOND}</b>",
         }
 
     # Stop loss hit
@@ -399,7 +401,7 @@ def classify_signal_update_text(text):
         return {
             "type": "SL_HIT",
             "status": "SL_HIT",
-            "text": f"<b>STOP LOSS HIT{extra} ❌</b>",
+            "text": f"<b>STOP LOSS HIT{extra} {EMOJI_CROSS}</b>",
         }
 
     # Breakeven hit
@@ -407,7 +409,7 @@ def classify_signal_update_text(text):
         return {
             "type": "BE_HIT",
             "status": "BREAKEVEN_HIT",
-            "text": "<b>BREAKEVEN HIT 💎</b>",
+            "text": f"<b>BREAKEVEN HIT {EMOJI_DIAMOND}</b>",
         }
 
     # Move SL / protect
@@ -421,13 +423,13 @@ def classify_signal_update_text(text):
             return {
                 "type": "MOVE_SL",
                 "status": "SL_TO_BE",
-                "text": "<b>SL MOVED TO BREAKEVEN 💎</b>",
+                "text": f"<b>SL MOVED TO BREAKEVEN {EMOJI_DIAMOND}</b>",
             }
         return {
             "type": "MOVE_SL",
             "status": "SL_UPDATED",
             "price": target,
-            "text": f"<b>SL UPDATED TO {target} 💎</b>",
+            "text": f"<b>SL UPDATED TO {target} {EMOJI_DIAMOND}</b>",
         }
 
     # Entry activated / order triggered
@@ -435,7 +437,7 @@ def classify_signal_update_text(text):
         return {
             "type": "ENTRY_TRIGGERED",
             "status": "ENTRY_TRIGGERED",
-            "text": "<b>ENTRY TRIGGERED 💎</b>",
+            "text": f"<b>ENTRY TRIGGERED {EMOJI_DIAMOND}</b>",
         }
 
     # Close / secure trade
@@ -444,7 +446,7 @@ def classify_signal_update_text(text):
         return {
             "type": "CLOSE",
             "status": "CLOSED_MANUAL",
-            "text": f"<b>CLOSE TRADE NOW{extra} 💎</b>",
+            "text": f"<b>CLOSE TRADE NOW{extra} {EMOJI_DIAMOND}</b>",
         }
 
     # Partial close / secure partial
@@ -453,7 +455,7 @@ def classify_signal_update_text(text):
         return {
             "type": "PARTIAL",
             "status": "PARTIAL_PROFIT",
-            "text": f"<b>PARTIAL PROFITS SECURED{extra} 💎</b>",
+            "text": f"<b>PARTIAL PROFITS SECURED{extra} {EMOJI_DIAMOND}</b>",
         }
 
     # TP hit / target hit
@@ -464,7 +466,7 @@ def classify_signal_update_text(text):
         return {
             "type": "TP_HIT",
             "status": "TP_HIT",
-            "text": f"<b>{tp_part}{extra} 💎</b>",
+            "text": f"<b>{tp_part}{extra} {EMOJI_DIAMOND}</b>",
         }
 
     # Pips-only running profit
@@ -472,7 +474,7 @@ def classify_signal_update_text(text):
         return {
             "type": "PIPS",
             "status": "RUNNING_PROFIT",
-            "text": f"<b>{pips_part}PIPS 💎</b>",
+            "text": f"<b>{pips_part}PIPS {EMOJI_DIAMOND}</b>",
         }
 
     # Hold / running
@@ -480,7 +482,7 @@ def classify_signal_update_text(text):
         return {
             "type": "RUNNING",
             "status": "RUNNING",
-            "text": "<b>TRADE STILL RUNNING 💎</b>",
+            "text": f"<b>TRADE STILL RUNNING {EMOJI_DIAMOND}</b>",
         }
 
     return None
@@ -613,7 +615,7 @@ def move_update_from_text(text):
         return None
 
     if re.search(r"\b(CANCEL|CANCELLED|REMOVE|REMOVED|INVALID|DELETE|DELETED|NO\s+TRADE|DON'?T\s+ENTER|DO\s+NOT\s+ENTER)\b", t):
-        return {"type": "CANCEL", "status": "CANCELLED", "text": "<b>SIGNAL CANCELLED / REMOVED 💎</b>"}
+        return {"type": "CANCEL", "status": "CANCELLED", "text": f"<b>SIGNAL CANCELLED / REMOVED {EMOJI_DIAMOND}</b>"}
 
     if not re.search(r"\b(MOVE|MOVED|CHANGE|CHANGED|UPDATE|UPDATED|ENTERED|ENTRY|ENTRIES|LIMIT)\b", t):
         return None
@@ -630,7 +632,7 @@ def move_update_from_text(text):
         "type": "MOVE_ENTRY",
         "status": "ENTRY_UPDATED",
         "price": price,
-        "text": f"<b>ENTRY UPDATED TO {price} 💎</b>",
+        "text": f"<b>ENTRY UPDATED TO {price} {EMOJI_DIAMOND}</b>",
     }
 
 
