@@ -885,6 +885,66 @@ async def send_full_signal(message, result, key, original_text, forward_raw=True
     return True
 
 
+def is_obvious_non_trade_partial(text: str) -> bool:
+    t = (text or "").strip()
+    low = t.lower()
+    up = t.upper()
+
+    if not t:
+        return True
+
+    blocked_phrases = [
+        "click what you need",
+        "spots are limited",
+        "market tonight",
+        "market open tonight",
+        "are we ready",
+        "happy sunday",
+        "hello everyone",
+        "ciao ragazzi",
+        "come state",
+        "caricate bene",
+        "vote guys",
+        "i'll post",
+        "last few seconds",
+        "school | vip",
+        "ebook",
+        "mt5 guide",
+        "free life-time",
+        "instagram",
+        "daily overview",
+        "weekly recap",
+    ]
+
+    if any(p in low for p in blocked_phrases):
+        return True
+
+    # Messages with only hype/announcement wording and no trade levels should not buffer.
+    has_direction = bool(re.search(r"\b(BUY|SELL|BUYS|SELLS|BUYING|SELLING|LONG|SHORT)\b", up))
+    has_symbol = bool(re.search(r"\b(XAU|XAUUSD|GOLD|BTC|BTCUSD|NAS100|NASDAQ|US100|GER40|US30|EURUSD|GBPUSD|USDJPY)\b", up))
+    has_trade_level_word = bool(re.search(r"\b(SL|STOP|STOPLOSS|TP|TARGET|ENTRY|LIMIT|ABOVE|BELOW|UNDER|OVER)\b", up))
+    has_price = bool(re.search(r"\b\d{3,7}(?:\.\d+)?\b", up))
+
+    if not has_direction and not has_symbol and not has_trade_level_word:
+        return True
+
+    # Hype text with no usable price should not buffer.
+    if not has_price and not has_trade_level_word:
+        return True
+
+    return False
+
+
+def should_buffer_partial_piece(text: str) -> bool:
+    if is_obvious_non_trade_partial(text):
+        return False
+
+    if looks_like_signal(text) or looks_like_partial_signal_piece(text):
+        return True
+
+    return False
+
+
 @client.on(events.NewMessage())
 @client.on(events.MessageEdited())
 async def on_signal_hub_message(event):
@@ -923,8 +983,8 @@ async def on_signal_hub_message(event):
             log.info("[signal hub skipped] not a clean signal")
             return
 
-        if not (looks_like_signal(text) or looks_like_partial_signal_piece(text)):
-            log.info("[signal hub skipped] not signal-like")
+        if not should_buffer_partial_piece(text):
+            log.info("[signal hub skipped] not signal-like / partial blocked")
             return
 
         trim_buffer(key)
@@ -975,6 +1035,7 @@ async def main():
     log.info("AI/source replies to the forwarded original: True")
     log.info(f"Universal AI extractor active for any pair")
     log.info(f"Partial signal buffer: {PARTIAL_BUFFER_ENABLED} | window={BUFFER_WINDOW_SECONDS}s | max={BUFFER_MAX_MESSAGES}")
+    log.info("Partial buffer strict guard active: True")
     log.info(f"Content signal dedupe active: {CONTENT_DEDUPE_ENABLED}")
     log.info(f"SIGNAL_SEND_RETRY_ATTEMPTS={SIGNAL_SEND_RETRY_ATTEMPTS}")
     log.info(f"SIGNAL_SEND_RETRY_SLEEP_CAP_SECONDS={SIGNAL_SEND_RETRY_SLEEP_CAP_SECONDS}")
